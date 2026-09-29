@@ -144,6 +144,25 @@ def test_recursive_walk_descends_into_subfolders() -> None:
     assert {item.path for item in source.iter_files()} == {"root.mp3", "Book 1/ch01.mp3"}
 
 
+def test_directory_iterator_yields_directories_and_files_per_directory() -> None:
+    def handler(request: httpx.Request, params: dict[str, str]) -> httpx.Response:
+        query = params["q"]
+        if FOLDER_MIME in query and "root-folder" in query:
+            return listing([{"id": "sub", "name": "Book 1", "mimeType": FOLDER_MIME}])
+        if FOLDER_MIME in query:
+            return listing([])
+        if "'sub' in parents" in query:
+            return listing([{"id": "5", "name": "ch01.mp3", "size": "10"}])
+        return listing([{"id": "4", "name": "root.mp3", "size": "10"}])
+
+    source, _auth = make_source(DriveStub(handler), folder_id="root-folder")
+    folders = list(source.iter_directories())
+    assert folders == [("root-folder", ""), ("sub", "Book 1/")]
+    assert list(source.iter_child_directories("root-folder")) == [("sub", "Book 1/")]
+    assert [item.path for item in source.iter_directory_files(*folders[0])] == ["root.mp3"]
+    assert [item.path for item in source.iter_directory_files(*folders[1])] == ["Book 1/ch01.mp3"]
+
+
 def test_non_recursive_folder_listing_skips_subfolders() -> None:
     def handler(request: httpx.Request, params: dict[str, str]) -> httpx.Response:
         assert FOLDER_MIME not in params["q"]

@@ -184,7 +184,7 @@ finally:
 
 ## Private audiobook web app
 
-The repository also includes an early mobile-first audiobook PWA. It uses the existing Drive range reader, puts Google credentials on the server, and saves playback positions in SQLite.
+The repository also includes a mobile-first audiobook PWA. It streams audio from Google Drive with byte ranges, keeps Google credentials on the server, and stores playback and library tools in SQLite.
 
 Set these server environment variables before start:
 
@@ -200,13 +200,19 @@ APP_DB_PATH=data/audiobooks.sqlite3
 
 Create a Google OAuth **Web application** client. Add `APP_BASE_URL/auth/callback` as its authorized redirect URI. Enable Drive API, then start the app with `uv run audiobook-web`. Put it behind an HTTPS reverse proxy and allow only the server to read the SQLite and OAuth files. Open the URL on the phone and add it to the home screen.
 
-The initial web app supports Google sign-in for one configured email, a recursively scanned Drive folder, chapter selection, range-proxied audio, and synced progress. The deployment settings above remain user-specific and are not committed.
+The web app supports Google sign-in for one configured email, background Drive scans with progress, lazy chapter browsing, and authenticated range-proxied playback. SQLite syncs saved position, favorites, ratings, tags, playlists, and recent listening history across devices. Library tools include search, status/favorite/tag/playlist filters, sorting, Continue Listening, storage summaries, and chapter selection. Feature tables persist across library rescans. The deployment settings above remain user-specific and are not committed.
 
 ## Development
 
+The web UI uses React, TypeScript, Vite, Tailwind CSS, and local shadcn-style components. Build the frontend before packaging or starting the web app. `uv build` packages the generated files from `src/audioscan/static`:
+
 ```bash
+npm ci
+npm run build
 uv sync --extra dev --extra gdrive --extra web
 uv run pytest
 uv run ruff check .
 uv run mypy src
 ```
+
+Vite writes production assets to `src/audioscan/static`, which FastAPI serves at `/static/`. During UI work, run `npm run dev` and the backend on `127.0.0.1:8111`.

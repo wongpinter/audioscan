@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 import re
 import secrets
 import sqlite3
+import threading
+import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -15,6 +20,7 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import (
+    FileResponse,
     HTMLResponse,
     JSONResponse,
     RedirectResponse,
@@ -23,7 +29,7 @@ from fastapi.responses import (
 )
 from starlette.middleware.sessions import SessionMiddleware
 
-from .models import SOURCE_GDRIVE, TrackMeta
+from .models import SOURCE_GDRIVE, Chapter, Cover, TrackMeta
 from .naming import group_tracks
 from .probe import probe
 from .reader import FetchError, SeekableBlockReader
@@ -31,12 +37,15 @@ from .sources.base import RemoteFile
 from .sources.gdrive import DRIVE_API, DRIVE_READONLY_SCOPE, DriveError, DriveSource
 from .sources.http import HttpRangeFetcher
 
+logger = logging.getLogger(__name__)
+
 
 class WebConfig:
     def __init__(self) -> None:
         self.allowed_email = os.getenv("APP_ALLOWED_EMAIL", "").strip().lower()
         self.base_url = os.getenv("APP_BASE_URL", "http://localhost:8000").rstrip("/")
         self.host = self.base_url.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
+        self.public_base_url = os.getenv("APP_PUBLIC_BASE_URL", self.base_url).rstrip("/")
         self.secret = os.getenv("APP_SECRET_KEY", "")
         self.cookie_secure = self.base_url.startswith("https://")
         self.require_https = self.cookie_secure or self.host in {"localhost", "127.0.0.1", "::1"}
@@ -86,6 +95,39 @@ class Database:
                 CREATE TABLE IF NOT EXISTS credentials (
                     id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS scan_state (
+                    id INTEGER PRIMARY KEY CHECK(id=1), status TEXT NOT NULL,
+                    total INTEGER NOT NULL DEFAULT 0, processed INTEGER NOT NULL DEFAULT 0,
+                    current TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS scan_items (
+                    id TEXT PRIMARY KEY, data TEXT NOT NULL, error TEXT NOT NULL DEFAULT ''
+                );
+                CREATE TABLE IF NOT EXISTS favorites (
+                    book_id TEXT PRIMARY KEY
+                );
+                CREATE TABLE IF NOT EXISTS ratings (
+                    book_id TEXT PRIMARY KEY,
+                    rating INTEGER NOT NULL CHECK(rating BETWEEN 1 AND 5)
+                );
+                CREATE TABLE IF NOT EXISTS book_tags (
+                    book_id TEXT NOT NULL, tag TEXT NOT NULL,
+                    PRIMARY KEY(book_id, tag)
+                );
+                CREATE TABLE IF NOT EXISTS playlists (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS playlist_books (
+                    playlist_id TEXT NOT NULL, book_id TEXT NOT NULL,
+                    position INTEGER NOT NULL, PRIMARY KEY(playlist_id, book_id)
+                );
+                CREATE TABLE IF NOT EXISTS listening_history (
+                    id INTEGER PRIMARY KEY, book_id TEXT NOT NULL, track_id TEXT NOT NULL,
+                    position REAL NOT NULL DEFAULT 0,
+                    played_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
             """)
 
     @contextmanager
@@ -123,9 +165,16 @@ class Database:
             books = db.execute("SELECT data FROM books ORDER BY title COLLATE NOCASE").fetchall()
             progress = {row["book_id"]: dict(row) for row in db.execute("SELECT * FROM progress")}
         output = []
+        features = self.feature_data()
         for row in books:
             book = json.loads(row["data"])
             book["progress"] = progress.get(book["id"])
+            book["favorite"] = book["id"] in features["favorites"]
+            book["rating"] = features["ratings"].get(book["id"])
+            book["tags"] = features["tags"].get(book["id"], [])
+            for track in book.get("tracks", []):
+                track["chapter_count"] = track.get("chapter_count", len(track.get("chapters", [])))
+                track["chapters"] = []
             output.append(book)
         return output
 
@@ -175,6 +224,51 @@ class Database:
                 ],
             )
 
+    def scan_status(self) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM scan_state WHERE id=1").fetchone()
+        return dict(row) if row else None
+
+    def save_scan_status(self, **values: Any) -> None:
+        fields = ("status", "total", "processed", "current", "error")
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM scan_state WHERE id=1").fetchone()
+            status = (
+                dict(row)
+                if row
+                else {
+                    "status": "running",
+                    "total": 0,
+                    "processed": 0,
+                    "current": "",
+                    "error": "",
+                }
+            )
+            status.update({key: value for key, value in values.items() if key in fields})
+            db.execute(
+                "INSERT INTO scan_state (id,status,total,processed,current,error) "
+                "VALUES(1,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+                "status=excluded.status,total=excluded.total,processed=excluded.processed,"
+                "current=excluded.current,error=excluded.error,updated_at=CURRENT_TIMESTAMP",
+                [status[key] for key in fields],
+            )
+
+    def pending_scan_items(self) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute("SELECT data FROM scan_items").fetchall()
+        return [json.loads(row["data"]) for row in rows]
+
+    def save_scan_item(self, item: dict[str, Any], error: str = "") -> None:
+        with self.connect() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO scan_items(id,data,error) VALUES(?,?,?)",
+                (item["id"], json.dumps(item), error),
+            )
+
+    def clear_scan_items(self) -> None:
+        with self.connect() as db:
+            db.execute("DELETE FROM scan_items")
+
     def save_progress(self, book_id: str, track_id: str, position: float) -> None:
         with self.connect() as db:
             db.execute(
@@ -185,6 +279,49 @@ class Database:
                 (book_id, track_id, position),
             )
 
+    def feature_data(self) -> dict[str, Any]:
+        with self.connect() as db:
+            favorites = [row[0] for row in db.execute("SELECT book_id FROM favorites")]
+            ratings = {row[0]: row[1] for row in db.execute("SELECT book_id,rating FROM ratings")}
+            tags: dict[str, list[str]] = {}
+            for row in db.execute("SELECT book_id,tag FROM book_tags ORDER BY tag COLLATE NOCASE"):
+                tags.setdefault(row[0], []).append(row[1])
+            playlists = [
+                dict(row) for row in db.execute("SELECT * FROM playlists ORDER BY created_at")
+            ]
+            for playlist in playlists:
+                playlist["book_ids"] = [
+                    row[0]
+                    for row in db.execute(
+                        "SELECT book_id FROM playlist_books WHERE playlist_id=? ORDER BY position",
+                        (playlist["id"],),
+                    )
+                ]
+            history = [
+                dict(row)
+                for row in db.execute(
+                    "SELECT * FROM listening_history ORDER BY played_at DESC, id DESC LIMIT 50"
+                )
+            ]
+        return {
+            "favorites": favorites,
+            "ratings": ratings,
+            "tags": tags,
+            "playlists": playlists,
+            "history": history,
+        }
+
+    def record_history(self, book_id: str, track_id: str, position: float = 0) -> None:
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO listening_history(book_id,track_id,position) VALUES(?,?,?)",
+                (book_id, track_id, position),
+            )
+            db.execute(
+                "DELETE FROM listening_history WHERE id NOT IN "
+                "(SELECT id FROM listening_history ORDER BY played_at DESC, id DESC LIMIT 1000)"
+            )
+
 
 class StoredDriveAuth:
     """Load and refresh OAuth credentials stored on the server."""
@@ -193,6 +330,7 @@ class StoredDriveAuth:
         self.db = db
         self._credentials_path = credentials_path
         self.creds: Any = None
+        self._lock = threading.RLock()
 
     def _load(self) -> Any:
         from google.oauth2.credentials import Credentials
@@ -206,16 +344,18 @@ class StoredDriveAuth:
     def headers(self) -> dict[str, str]:
         from google.auth.transport.requests import Request as GoogleRequest
 
-        creds = self.creds or self._load()
-        if not creds.valid:
-            creds.refresh(GoogleRequest())
-            self.db.save_credentials(creds.to_json())
-        self.db.sync_credentials(self._credentials_path)
-        return {"Authorization": f"Bearer {creds.token}"}
+        with self._lock:
+            creds = self.creds or self._load()
+            if not creds.valid:
+                creds.refresh(GoogleRequest())
+                self.db.save_credentials(creds.to_json())
+            self.db.sync_credentials(self._credentials_path)
+            return {"Authorization": f"Bearer {creds.token}"}
 
     def refresh(self) -> None:
-        self.creds = None
-        self.headers()
+        with self._lock:
+            self.creds = None
+            self.headers()
 
 
 def _range_header(value: str, size: int) -> tuple[int, int]:
@@ -247,6 +387,276 @@ def _mime_type(track: dict[str, Any]) -> str:
     }.get(Path(track["name"]).suffix.lower(), "application/octet-stream")
 
 
+class LibraryScanner:
+    """Background Drive scanner with per-file checkpoints and retry support."""
+
+    def __init__(self, config: WebConfig, db: Database) -> None:
+        self.config = config
+        self.db = db
+        self.lock = threading.Lock()
+        self.events: list[dict[str, Any]] = []
+        self.event_id = 0
+        self.event_lock = threading.Lock()
+
+    def publish(self, **event: Any) -> None:
+        with self.event_lock:
+            self.event_id += 1
+            self.events.append({"id": self.event_id, **event})
+            self.events = self.events[-200:]
+        self.db.save_scan_status(**event)
+
+    def start(self, retry_failed: bool = True) -> bool:
+        if not self.lock.acquire(blocking=False):
+            return False
+        old_status = self.db.scan_status() or {}
+        resume = old_status.get("status") in {"running", "failed", "interrupted"}
+        self.db.save_scan_status(status="running", error="", current="")
+        threading.Thread(target=self.run, args=(retry_failed, resume), daemon=True).start()
+        return True
+
+    def run(self, retry_failed: bool = True, resume: bool = False) -> None:
+        try:
+            self._run(retry_failed, resume)
+        except Exception as exc:
+            logger.exception("Drive library scan failed")
+            self.publish(status="failed", error=str(exc), current="")
+        finally:
+            self.lock.release()
+
+    def stop_incomplete_scan(self) -> None:
+        status = self.db.scan_status()
+        if status and status.get("status") == "running":
+            self.db.save_scan_status(status="interrupted", current="")
+
+    def _run(self, retry_failed: bool, resume: bool) -> None:
+        self.config.check()
+        auth = StoredDriveAuth(self.db, self.config.credentials_path)
+        source = DriveSource(
+            folder_id=self.config.folder_id,
+            auth=auth,
+            timeout=60,
+            budget_bytes=None,
+            max_retries=3,
+        )
+        try:
+            self.publish(
+                status="running",
+                total=0,
+                processed=0,
+                current="Connecting to Google Drive",
+                error="",
+            )
+            items = self.db.pending_scan_items() if resume else []
+            if not resume:
+                self.db.clear_scan_items()
+                items = []
+            failed_ids = {item["id"] for item in items if item.get("error")}
+            if retry_failed:
+                items = [item for item in items if not item.get("error")]
+                with self.db.connect() as connection:
+                    connection.execute("DELETE FROM scan_items WHERE error != ''")
+            seen = {item["id"] for item in items}
+            failures = 0
+            total = len(seen)
+            processed = len(seen)
+            stack = [(self.config.folder_id, "")]
+            visited: set[str] = set()
+            while stack:
+                folder_id, prefix = stack.pop()
+                if folder_id in visited:
+                    continue
+                visited.add(folder_id)
+                self.publish(
+                    status="running",
+                    total=total,
+                    processed=processed,
+                    current=f"Listing folders: {prefix or '/'}",
+                    error="",
+                )
+                folders = list(source.iter_child_directories(folder_id, prefix))
+                logger.info("Drive scan folder listing complete folders=%d", len(folders))
+                stack.extend(reversed(folders))
+                self.publish(
+                    status="running",
+                    total=total,
+                    processed=processed,
+                    current=f"Listing files: {prefix or '/'}",
+                    error="",
+                )
+                files = list(source.iter_directory_files(folder_id, prefix))
+                logger.info(
+                    "Drive scan file listing complete files=%d path=%s", len(files), prefix or "/"
+                )
+                total += len(files)
+                self.publish(total=total, processed=processed, current=prefix or "/")
+                pending = [remote for remote in files if remote.id not in seen]
+                with ThreadPoolExecutor(max_workers=5, thread_name_prefix="drive-probe") as pool:
+                    futures = {
+                        pool.submit(self._probe_remote, source, remote): remote
+                        for remote in pending
+                    }
+                    for future in as_completed(futures):
+                        remote = futures[future]
+                        item = future.result()
+                        error = item["error"]
+                        logger.info(
+                            "Drive scan file complete path=%s error=%s", remote.path, bool(error)
+                        )
+                        self.db.save_scan_item(item, error)
+                        items.append(item)
+                        seen.add(remote.id)
+                        processed += 1
+                        failures += bool(error)
+                        self.publish(
+                            status="running",
+                            total=total,
+                            processed=processed,
+                            current=remote.path,
+                            error="",
+                        )
+                        if processed % 50 == 0:
+                            self._commit(items)
+                        if error:
+                            failed_ids.add(remote.id)
+            if retry_failed and failures:
+                with self.db.connect() as connection:
+                    connection.execute("DELETE FROM scan_items WHERE error != ''")
+                self.db.save_scan_status(status="failed", processed=processed - failures)
+                self.start(retry_failed=False)
+                return
+            self._commit(items)
+            remaining_failures = len(failed_ids) if not retry_failed else failures
+            current_status = self.db.scan_status()
+            if current_status and current_status.get("status") == "failed":
+                self.db.save_scan_status(processed=processed - failures)
+            self.publish(
+                status="failed" if remaining_failures else "completed",
+                total=total,
+                processed=processed,
+                current="",
+                error=(
+                    f"{remaining_failures} file(s) failed after retries"
+                    if remaining_failures
+                    else ""
+                ),
+            )
+        finally:
+            source.close()
+
+    def _probe_remote(self, source: DriveSource, remote: RemoteFile) -> dict[str, Any]:
+        track: TrackMeta | None = None
+        error = ""
+        for attempt in range(3):
+            logger.info("Drive scan probing file attempt=%d path=%s", attempt + 1, remote.path)
+            stream = None
+            try:
+                stream = source.open(remote)
+                track = probe(
+                    stream,
+                    name=remote.name,
+                    path=remote.path,
+                    source=SOURCE_GDRIVE,
+                    file_id=remote.id,
+                    size=remote.size,
+                    mime_type=remote.mime_type,
+                    modified=remote.modified,
+                )
+                error = track.error or ""
+                break
+            except Exception as exc:
+                error = str(exc)
+                if attempt < 2:
+                    time.sleep(0.5 * (2**attempt))
+            finally:
+                if stream is not None:
+                    stream.close()
+        if track is None:
+            track = TrackMeta(
+                source=SOURCE_GDRIVE,
+                id=remote.id,
+                name=remote.name,
+                path=remote.path,
+                size=remote.size,
+                mime_type=remote.mime_type,
+                error=error,
+            )
+        return {
+            "id": remote.id,
+            "path": remote.path,
+            "name": remote.name,
+            "size": remote.size,
+            "mime_type": remote.mime_type,
+            "meta": track.to_dict(),
+            "error": error,
+        }
+
+    def _commit(self, items: list[dict[str, Any]]) -> None:
+        metadata = []
+        for item in items:
+            values = {
+                key: value
+                for key, value in item["meta"].items()
+                if key in TrackMeta.__dataclass_fields__
+            }
+            values["covers"] = [
+                Cover(
+                    **{
+                        key: value
+                        for key, value in cover.items()
+                        if key in Cover.__dataclass_fields__
+                    }
+                )
+                for cover in values.get("covers", [])
+            ]
+            values["chapters"] = [
+                Chapter(
+                    **{
+                        key: value
+                        for key, value in chapter.items()
+                        if key in Chapter.__dataclass_fields__
+                    }
+                )
+                for chapter in values.get("chapters", [])
+            ]
+            metadata.append(TrackMeta(**values))
+        remote_by_id = {item["id"]: item for item in items}
+        books: list[dict[str, Any]] = []
+        tracks: list[dict[str, Any]] = []
+        for group in group_tracks(metadata):
+            members = []
+            for grouped in group.tracks:
+                meta = grouped.track.to_dict()
+                original = remote_by_id[meta["id"]]
+                track = {
+                    "id": original["id"],
+                    "book_id": group.key,
+                    "name": original["name"],
+                    "path": original["path"],
+                    "size": original["size"] or 0,
+                    "mime_type": original["mime_type"],
+                    "title": meta.get("title") or original["name"],
+                    "duration": meta.get("duration") or 0,
+                    "chapters": meta.get("chapters") or [],
+                    "chapter_count": len(meta.get("chapters") or []),
+                    "format": meta.get("format"),
+                }
+                tracks.append(track)
+                members.append(track)
+            first = group.tracks[0].track
+            books.append(
+                {
+                    "id": group.key,
+                    "title": group.title,
+                    "artist": first.albumartist or first.artist,
+                    "cover": f"/api/tracks/{members[0]['id']}/cover" if first.covers else None,
+                    "duration": group.total_duration,
+                    "tracks": members,
+                }
+            )
+        self.db.save_library(books, tracks)
+        logger.info("Drive scan checkpoint committed books=%d tracks=%d", len(books), len(tracks))
+
+
 def create_app(config: WebConfig | None = None, db: Database | None = None) -> FastAPI:
     config = config or WebConfig()
     if not config.secret:
@@ -261,24 +671,65 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
     )
     app.state.config = config
     app.state.db = db
+    scanner = LibraryScanner(config, db)
+    app.state.scanner = scanner
+
+    @app.middleware("http")
+    async def recover_interrupted_scan(request: Request, call_next: Any) -> Response:
+        if not getattr(app.state, "scan_recovered", False):
+            app.state.scan_recovered = True
+            scanner.stop_incomplete_scan()
+            status = db.scan_status()
+            if status and status.get("status") == "interrupted":
+                scanner.start()
+        response = await call_next(request)
+        if request.url.path in {"/auth/google", "/auth/callback", "/", "/api/library"}:
+            set_cookie = response.headers.get("set-cookie", "")
+            logger.warning(
+                "auth_http method=%s path=%s status=%s scheme=%s host=%s cookie_in=%s "
+                "session_email=%s set_cookie=%s set_cookie_secure=%s",
+                request.method,
+                request.url.path,
+                response.status_code,
+                request.url.scheme,
+                request.url.hostname,
+                bool(request.cookies.get("session")),
+                bool(request.session.get("email")),
+                bool(set_cookie),
+                "secure" in set_cookie.lower(),
+            )
+        return response
 
     def user(request: Request) -> str:
         email = str(request.session.get("email", "")).lower()
         if not email or email != config.allowed_email:
+            logger.warning(
+                "auth_rejected path=%s cookie_in=%s session_email=%s allowed_email_configured=%s",
+                request.url.path,
+                bool(request.cookies.get("session")),
+                bool(email),
+                bool(config.allowed_email),
+            )
             raise HTTPException(401, "Sign in required")
         return email
 
-    def flow_for(state: str | None = None) -> Any:
+    def flow_for(state: str | None = None, code_verifier: str | None = None) -> Any:
         from google_auth_oauthlib.flow import Flow
 
         if not config.client_secrets.is_file():
             raise HTTPException(503, "Set GOOGLE_CLIENT_SECRETS to an OAuth web client JSON file")
+        if code_verifier is None and state is None:
+            code_verifier = secrets.token_urlsafe(64)
         flow = Flow.from_client_secrets_file(
             str(config.client_secrets),
             scopes=["openid", "email", "profile", DRIVE_READONLY_SCOPE],
             state=state,
+            code_verifier=code_verifier,
+            autogenerate_code_verifier=False,
         )
-        flow.redirect_uri = f"{config.base_url}/auth/callback"
+        if code_verifier is not None:
+            flow.oauth2session._client.code_verifier = code_verifier
+        flow.redirect_uri = f"{config.public_base_url}/auth/callback"
         return flow
 
     @app.get("/auth/google")
@@ -292,6 +743,7 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
         )
         request.session["oauth_state"] = state
         request.session["oauth_callback_url"] = flow.redirect_uri
+        request.session["oauth_code_verifier"] = flow.code_verifier
         return RedirectResponse(url)
 
     @app.get("/auth/callback")
@@ -302,10 +754,24 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
         valid_state = state and expected and secrets.compare_digest(state, expected)
         if error or not code or not valid_state:
             raise HTTPException(400, "Google sign-in was cancelled or state validation failed")
-        flow = flow_for(state)
+        flow = flow_for(state, request.session.pop("oauth_code_verifier", None))
         if request.session.pop("oauth_callback_url", "") != flow.redirect_uri:
             raise HTTPException(400, "OAuth callback URL changed during sign-in")
-        flow.fetch_token(code=code)
+        if not flow.code_verifier:
+            raise HTTPException(400, "OAuth code verifier missing. Start sign-in again.")
+        try:
+            from oauthlib.oauth2 import WebApplicationClient
+
+            os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
+            client = WebApplicationClient(flow.client_config["client_id"])
+            client.code_verifier = flow.code_verifier
+            flow.oauth2session._client = client
+            flow.fetch_token(code=code)
+        except Exception as exc:
+            logger.exception("Google OAuth token exchange failed")
+            raise HTTPException(
+                400, "Google token exchange failed. Check server logs, then start sign-in again."
+            ) from exc
         creds = flow.credentials
         try:
             from google.auth.transport.requests import Request as GoogleRequest
@@ -326,11 +792,11 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
             raise HTTPException(403, "Approve read-only Google Drive access to use the library")
         if not creds.refresh_token:
             raise HTTPException(403, "Reconnect Google with offline access enabled")
-        request.session.clear()
-        request.session["email"] = email
         db.save_credentials(creds.to_json())
         db.sync_credentials(config.credentials_path)
-        return RedirectResponse("/")
+        request.session.clear()
+        request.session["email"] = email
+        return RedirectResponse("/", headers={"Cache-Control": "no-store"})
 
     @app.post("/auth/logout")
     def logout(request: Request) -> Response:
@@ -339,68 +805,6 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
         db.save_credentials("{}")
         config.credentials_path.unlink(missing_ok=True)
         return Response(status_code=204)
-
-    def refresh_library() -> None:
-        config.check()
-        auth = StoredDriveAuth(db, config.credentials_path)
-        source = DriveSource(folder_id=config.folder_id, auth=auth, timeout=60, budget_bytes=None)
-        try:
-            metadata: list[TrackMeta] = []
-            remote_by_id: dict[str, RemoteFile] = {}
-            for remote in source.iter_files():
-                stream = source.open(remote)
-                try:
-                    track = probe(
-                        stream,
-                        name=remote.name,
-                        path=remote.path,
-                        source=SOURCE_GDRIVE,
-                        file_id=remote.id,
-                        size=remote.size,
-                        mime_type=remote.mime_type,
-                        modified=remote.modified,
-                    )
-                    metadata.append(track)
-                    remote_by_id[remote.id] = remote
-                finally:
-                    stream.close()
-            groups = group_tracks(metadata)
-            tracks: list[dict[str, Any]] = []
-            books: list[dict[str, Any]] = []
-            for group in groups:
-                book_id = group.key
-                members = []
-                for grouped in group.tracks:
-                    meta = grouped.track.to_dict()
-                    remote = remote_by_id[meta["id"]]
-                    item = {
-                        "id": remote.id,
-                        "book_id": book_id,
-                        "name": remote.name,
-                        "path": remote.path,
-                        "size": remote.size or 0,
-                        "mime_type": remote.mime_type,
-                        "title": meta.get("title") or remote.name,
-                        "duration": meta.get("duration") or 0,
-                        "chapters": meta.get("chapters") or [],
-                        "format": meta.get("format"),
-                    }
-                    tracks.append(item)
-                    members.append(item)
-                first = group.tracks[0].track
-                books.append(
-                    {
-                        "id": book_id,
-                        "title": group.title,
-                        "artist": first.albumartist or first.artist,
-                        "cover": f"/api/tracks/{members[0]['id']}/cover" if first.covers else None,
-                        "duration": group.total_duration,
-                        "tracks": members,
-                    }
-                )
-            db.save_library(books, tracks)
-        finally:
-            source.close()
 
     @app.get("/api/library")
     def library(request: Request, refresh: bool = False) -> list[dict[str, Any]]:
@@ -411,21 +815,51 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
             raise HTTPException(503, str(exc)) from exc
         books = db.library()
         if refresh or not books:
-            try:
-                refresh_library()
-            except Exception as exc:
-                raise HTTPException(502, f"Could not scan Google Drive: {exc}") from exc
-            books = db.library()
+            scanner.start()
         return books
 
     @app.post("/api/library/refresh")
-    def library_refresh(request: Request) -> dict[str, int]:
+    def library_refresh(request: Request, retry_failed: bool = True) -> dict[str, Any]:
         user(request)
-        try:
-            refresh_library()
-        except Exception as exc:
-            raise HTTPException(502, f"Could not scan Google Drive: {exc}") from exc
-        return {"books": len(db.library())}
+        if not scanner.start(retry_failed=retry_failed):
+            raise HTTPException(409, "Library scan is already running")
+        return {"status": "running"}
+
+    @app.get("/api/library/scan")
+    def library_scan(request: Request) -> dict[str, Any]:
+        user(request)
+        return scanner.db.scan_status() or {
+            "status": "idle",
+            "total": 0,
+            "processed": 0,
+            "current": "",
+            "error": "",
+        }
+
+    @app.get("/api/library/events")
+    def library_events(request: Request) -> StreamingResponse:
+        user(request)
+
+        async def stream_events() -> Any:
+            yield f"data: {json.dumps(scanner.db.scan_status() or {'status': 'idle'})}\n\n"
+            last_id = 0
+            while not await request.is_disconnected():
+                with scanner.event_lock:
+                    pending = [event for event in scanner.events if event["id"] > last_id]
+                if pending:
+                    for event in pending:
+                        last_id = event["id"]
+                        yield f"id: {last_id}\ndata: {json.dumps(event)}\n\n"
+                    if pending[-1].get("status") in {"completed", "failed"}:
+                        return
+                else:
+                    status = scanner.db.scan_status() or {"status": "idle"}
+                    yield f"data: {json.dumps(status)}\n\n"
+                    if status.get("status") != "running":
+                        return
+                await asyncio.sleep(1)
+
+        return StreamingResponse(stream_events(), media_type="text/event-stream")
 
     @app.get("/api/books/{book_id}")
     def get_book(book_id: str, request: Request) -> dict[str, Any]:
@@ -434,6 +868,9 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
         if book is None:
             raise HTTPException(404, "Book not found")
         if book.get("tracks"):
+            for track in book["tracks"]:
+                track["chapter_count"] = track.get("chapter_count", len(track.get("chapters", [])))
+                track["chapters"] = []
             return book
         raise HTTPException(404, "Book has no playable tracks")
 
@@ -457,6 +894,160 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
         db.save_progress(book_id, track_id, position)
         return {"book_id": book_id, "track_id": track_id, "position": position}
 
+    @app.get("/api/features")
+    def features(request: Request) -> dict[str, Any]:
+        user(request)
+        data = db.feature_data()
+        known = {book["id"] for book in db.library()}
+        data["favorites"] = [book_id for book_id in data["favorites"] if book_id in known]
+        return data
+
+    @app.put("/api/books/{book_id}/favorite")
+    async def favorite(book_id: str, request: Request) -> dict[str, bool]:
+        user(request)
+        if db.book(book_id) is None:
+            raise HTTPException(404, "Book not found")
+        body = await request.json()
+        if not isinstance(body, dict) or not isinstance(body.get("favorite"), bool):
+            raise HTTPException(422, "favorite must be a boolean")
+        with db.connect() as connection:
+            if body["favorite"]:
+                connection.execute("INSERT OR IGNORE INTO favorites(book_id) VALUES(?)", (book_id,))
+            else:
+                connection.execute("DELETE FROM favorites WHERE book_id=?", (book_id,))
+        return {"favorite": body["favorite"]}
+
+    @app.put("/api/books/{book_id}/rating")
+    async def rating(book_id: str, request: Request) -> dict[str, int | None]:
+        user(request)
+        if db.book(book_id) is None:
+            raise HTTPException(404, "Book not found")
+        body = await request.json()
+        value = body.get("rating") if isinstance(body, dict) else None
+        if value is not None and (
+            not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 5
+        ):
+            raise HTTPException(422, "rating must be an integer from 1 to 5, or null")
+        with db.connect() as connection:
+            if value is None:
+                connection.execute("DELETE FROM ratings WHERE book_id=?", (book_id,))
+            else:
+                connection.execute(
+                    "INSERT INTO ratings(book_id,rating) VALUES(?,?) "
+                    "ON CONFLICT(book_id) DO UPDATE SET rating=excluded.rating",
+                    (book_id, value),
+                )
+        return {"rating": value}
+
+    @app.put("/api/books/{book_id}/tags")
+    async def tags(book_id: str, request: Request) -> dict[str, list[str]]:
+        user(request)
+        if db.book(book_id) is None:
+            raise HTTPException(404, "Book not found")
+        body = await request.json()
+        values = body.get("tags") if isinstance(body, dict) else None
+        if (
+            not isinstance(values, list)
+            or len(values) > 20
+            or any(
+                not isinstance(tag, str) or not tag.strip() or len(tag.strip()) > 40
+                for tag in values
+            )
+        ):
+            raise HTTPException(
+                422, "tags must be a list of up to 20 non-empty strings of at most 40 characters"
+            )
+        clean = list(dict.fromkeys(tag.strip() for tag in values))
+        with db.connect() as connection:
+            connection.execute("DELETE FROM book_tags WHERE book_id=?", (book_id,))
+            connection.executemany(
+                "INSERT INTO book_tags(book_id,tag) VALUES(?,?)", [(book_id, tag) for tag in clean]
+            )
+        return {"tags": clean}
+
+    @app.post("/api/playlists", status_code=201)
+    async def create_playlist(request: Request) -> dict[str, Any]:
+        user(request)
+        body = await request.json()
+        name = (
+            body.get("name", "").strip()
+            if isinstance(body, dict) and isinstance(body.get("name"), str)
+            else ""
+        )
+        if not name or len(name) > 80:
+            raise HTTPException(422, "playlist name must be 1..80 characters")
+        playlist_id = secrets.token_urlsafe(12)
+        with db.connect() as connection:
+            connection.execute("INSERT INTO playlists(id,name) VALUES(?,?)", (playlist_id, name))
+        return {"id": playlist_id, "name": name, "book_ids": []}
+
+    @app.put("/api/playlists/{playlist_id}/books")
+    async def playlist_books(playlist_id: str, request: Request) -> dict[str, list[str]]:
+        user(request)
+        body = await request.json()
+        ids = body.get("book_ids") if isinstance(body, dict) else None
+        if (
+            not isinstance(ids, list)
+            or len(ids) > 1000
+            or any(not isinstance(item, str) for item in ids)
+            or len(set(ids)) != len(ids)
+        ):
+            raise HTTPException(422, "book_ids must be a unique list of at most 1000 IDs")
+        known = {book["id"] for book in db.library()}
+        if any(item not in known for item in ids):
+            raise HTTPException(422, "all playlist books must exist in the library")
+        with db.connect() as connection:
+            if (
+                connection.execute("SELECT 1 FROM playlists WHERE id=?", (playlist_id,)).fetchone()
+                is None
+            ):
+                raise HTTPException(404, "Playlist not found")
+            connection.execute("DELETE FROM playlist_books WHERE playlist_id=?", (playlist_id,))
+            connection.executemany(
+                "INSERT INTO playlist_books(playlist_id,book_id,position) VALUES(?,?,?)",
+                [(playlist_id, book_id, i) for i, book_id in enumerate(ids)],
+            )
+        return {"book_ids": ids}
+
+    @app.delete("/api/playlists/{playlist_id}", status_code=204)
+    def delete_playlist(playlist_id: str, request: Request) -> Response:
+        user(request)
+        with db.connect() as connection:
+            connection.execute("DELETE FROM playlist_books WHERE playlist_id=?", (playlist_id,))
+            cursor = connection.execute("DELETE FROM playlists WHERE id=?", (playlist_id,))
+        if not cursor.rowcount:
+            raise HTTPException(404, "Playlist not found")
+        return Response(status_code=204)
+
+    @app.post("/api/history/{book_id}", status_code=204)
+    async def record_history(book_id: str, request: Request) -> Response:
+        user(request)
+        body = await request.json()
+        track_id = body.get("track_id") if isinstance(body, dict) else None
+        if not isinstance(track_id, str):
+            raise HTTPException(422, "track_id is required")
+        book = db.book(book_id)
+        if book is None or not any(track["id"] == track_id for track in book["tracks"]):
+            raise HTTPException(422, "track does not belong to this book")
+        db.record_history(book_id, track_id)
+        return Response(status_code=204)
+
+    @app.get("/api/storage")
+    def storage(request: Request) -> dict[str, Any]:
+        user(request)
+        with db.connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*), COALESCE(SUM(size),0) FROM tracks"
+            ).fetchone()
+            formats = connection.execute(
+                "SELECT mime_type, COUNT(*) FROM tracks GROUP BY mime_type ORDER BY COUNT(*) DESC"
+            ).fetchall()
+        return {
+            "tracks": row[0],
+            "bytes": row[1],
+            "formats": [{"mime_type": item[0] or "unknown", "count": item[1]} for item in formats],
+        }
+
     @app.get("/api/progress/{book_id}")
     def get_progress(book_id: str, request: Request) -> dict[str, Any] | None:
         user(request)
@@ -468,6 +1059,24 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
                 "SELECT * FROM progress WHERE book_id=?", (book_id,)
             ).fetchone()
         return dict(row) if row else None
+
+    @app.get("/api/tracks/{track_id}/chapters")
+    def track_chapters(
+        track_id: str, request: Request, offset: int = 0, limit: int = 50
+    ) -> dict[str, Any]:
+        user(request)
+        if offset < 0 or not 1 <= limit <= 100:
+            raise HTTPException(422, "offset must be non-negative and limit must be 1..100")
+        track = db.track(track_id)
+        if track is None:
+            raise HTTPException(404, "Track not found")
+        book = db.book(track["book_id"])
+        if book is None or not any(item["id"] == track_id for item in book["tracks"]):
+            raise HTTPException(404, "Track not found")
+        chapters = next(item["chapters"] for item in book["tracks"] if item["id"] == track_id)
+        page = chapters[offset : offset + limit]
+        next_offset = offset + len(page) if offset + len(page) < len(chapters) else None
+        return {"track_id": track_id, "chapters": page, "next_offset": next_offset}
 
     @app.head("/api/tracks/{track_id}/audio")
     def audio_head(track_id: str, request: Request) -> Response:
@@ -563,25 +1172,40 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
             file_id=remote.id,
             budget_bytes=4 * 1024 * 1024,
         )
-        stream = source.open(remote)
         try:
-            from .probe import cover_bytes
+            stream = source.open(remote)
+            try:
+                from .probe import cover_bytes
 
-            data = cover_bytes(stream)
-        finally:
-            stream.close()
-            source.close()
+                data, mime = cover_bytes(stream)
+            finally:
+                stream.close()
+                source.close()
+        except (DriveError, FetchError, ValueError) as exc:
+            logger.exception("Cover fetch failed track_id=%s", track_id)
+            raise HTTPException(502, "Could not fetch cover from Google Drive") from exc
+        except IndexError as exc:
+            raise HTTPException(404, "Cover not found") from exc
         if not data:
             raise HTTPException(404, "Cover not found")
         return Response(
-            data[0][2],
-            media_type=str(data[0][0]),
+            data,
+            media_type=mime or "application/octet-stream",
             headers={"Cache-Control": "private, max-age=3600"},
         )
 
+    static_dir = Path(__file__).with_name("static")
+
     @app.get("/", response_class=HTMLResponse)
-    def index() -> HTMLResponse:
-        return HTMLResponse(_INDEX)
+    def index() -> FileResponse:
+        return FileResponse(static_dir / "index.html", headers={"Cache-Control": "no-cache"})
+
+    @app.get("/static/{asset_path:path}")
+    def static_asset(asset_path: str) -> FileResponse:
+        path = (static_dir / asset_path).resolve()
+        if not path.is_relative_to(static_dir.resolve()) or not path.is_file():
+            raise HTTPException(404, "Asset not found")
+        return FileResponse(path, headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
     @app.get("/manifest.webmanifest")
     def manifest() -> JSONResponse:
@@ -621,6 +1245,10 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
     def favicon() -> Response:
         return Response(_ICON, media_type="image/svg+xml")
 
+    @app.get("/{client_path:path}", response_class=HTMLResponse)
+    def client_route(client_path: str) -> FileResponse:
+        return FileResponse(static_dir / "index.html", headers={"Cache-Control": "no-cache"})
+
     return app
 
 
@@ -637,7 +1265,8 @@ self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
   const isStaticGet = url.origin === location.origin
     && event.request.method === 'GET'
-    && !url.pathname.startsWith('/api/');
+    && !url.pathname.startsWith('/api/')
+    && url.pathname !== '/';
   if (isStaticGet) {
     event.respondWith(
       caches.match(event.request).then(response => response || fetch(event.request))
@@ -688,7 +1317,27 @@ _INDEX = r"""<!doctype html>
       padding: 14px;
       font: inherit;
     }
-    main { padding: 8px 18px 24px; }
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(260px, 0.8fr) minmax(0, 1.2fr);
+      gap: 20px;
+      padding: 8px 18px 24px;
+    }
+    #detail { min-width: 0; }
+    #detail h2 { margin: 8px 0; }
+    .content { padding: 12px 0; border-bottom: 1px solid #29292c; }
+    .content-title { font-weight: 650; margin-bottom: 8px; }
+    .chapter { padding: 8px 12px; color: var(--muted); cursor: pointer; }
+    .chapter:hover, .content-play { color: var(--accent); }
+    .back { display: none; }
+    @media (max-width: 700px) {
+      .layout { display: block; }
+      #detail { display: none; }
+      .layout.detail-open #library { display: none; }
+      .layout.detail-open #detail { display: block; }
+      .layout.detail-open #search { display: none; }
+      .layout.detail-open .back { display: inline; }
+    }
     .row {
       display: flex;
       gap: 14px;
@@ -741,7 +1390,6 @@ _INDEX = r"""<!doctype html>
     }
     audio { width: 100%; height: 38px; }
     #chapters { padding: 0 18px; }
-    .chapter { padding: 14px; border-bottom: 1px solid #2a2a2c; }
     .empty { padding: 30px 6px; color: var(--muted); line-height: 1.5; }
     .top { display: flex; justify-content: space-between; align-items: center; }
     .link { border: 0; color: var(--accent); background: none; font: inherit; }
@@ -751,15 +1399,21 @@ _INDEX = r"""<!doctype html>
 <body>
   <header>
     <div class="top">
+      <button class="link back" id="back" type="button">‹ Library</button>
       <h1 id="heading">Your library</h1>
-      <button class="link" id="signin">Sign in</button>
+      <a class="link" id="signin" href="/auth/google">Sign in</a>
     </div>
     <input id="search" placeholder="Search books and authors" autocomplete="off">
+    <p id="scan-status" role="status" aria-live="polite"></p>
   </header>
-  <main id="library">
-    <div class="empty">Sign in to connect your private audiobook library.</div>
+  <main class="layout" id="layout">
+    <section id="library">
+      <div class="empty">Sign in to connect your private audiobook library.</div>
+    </section>
+    <section id="detail" aria-live="polite">
+      <div class="empty">Choose an album to view its contents.</div>
+    </section>
   </main>
-  <section id="chapters"></section>
   <div id="player">
     <div id="now">Choose a book to start listening</div>
     <audio id="audio" controls preload="metadata"></audio>
@@ -769,7 +1423,7 @@ _INDEX = r"""<!doctype html>
     const esc = value => String(value ?? '').replace(/[&<>"']/g, char =>
       ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[char]));
     let books = [], active = null, lastSave = 0;
-    $('#signin').onclick = () => location.href = '/auth/google';
+    $('#signin').href = new URL('/auth/google', window.location.origin).href;
     async function api(url, options = {}) {
       const response = await fetch(url, {credentials: 'same-origin', ...options});
       if (response.status === 401) {
@@ -782,7 +1436,17 @@ _INDEX = r"""<!doctype html>
     async function load() {
       try {
         books = await api('/api/library');
+        $('#signin').textContent = 'Refresh';
+        $('#signin').href = '#';
+        $('#signin').onclick = event => { event.preventDefault(); startScan(); };
         render();
+        startScan();
+        const status = await fetch('/api/library/scan', {credentials: 'same-origin'});
+        if (status.ok) {
+          const scan = await status.json();
+          showScan(scan);
+          if (scan.status === 'running') watchScan();
+        }
       } catch (error) {
         if (error.message !== 'Sign in required') {
           $('#library').innerHTML =
@@ -790,7 +1454,43 @@ _INDEX = r"""<!doctype html>
         }
       }
     }
+    function showScan(status) {
+      if (status.status === 'idle') return;
+      $('#scan-status').textContent = status.error ||
+        `${status.status}: ${status.processed}/${status.total} · ${status.current || ''}`;
+      if (['completed', 'failed', 'interrupted'].includes(status.status) && scanEvents) {
+        scanEvents.close();
+      }
+    }
+    let scanEvents = null;
+    function watchScan() {
+      if (scanEvents) scanEvents.close();
+      scanEvents = new EventSource('/api/library/events');
+      scanEvents.onmessage = event => {
+        const status = JSON.parse(event.data);
+        showScan(status);
+        if (['completed', 'failed'].includes(status.status)) {
+          scanEvents.close();
+          load();
+        }
+      };
+    }
+    async function startScan() {
+      try {
+        const response = await fetch('/api/library/refresh', {
+          method: 'POST', credentials: 'same-origin'
+        });
+        if (response.ok) watchScan();
+        else if (response.status === 409) watchScan();
+        else {
+          $('#scan-status').textContent = await response.text();
+        }
+      } catch (error) {
+        $('#scan-status').textContent = 'Could not start library scan.';
+      }
+    }
     function render() {
+      $('#heading').textContent = 'Your library';
       const query = $('#search').value.toLowerCase();
       const filtered = books.filter(book =>
         (book.title + ' ' + (book.artist || '')).toLowerCase().includes(query));
@@ -802,29 +1502,46 @@ _INDEX = r"""<!doctype html>
             <span>${esc(book.artist || 'Audiobook')} ·
               ${Math.round((book.duration || 0) / 60)} min</span>
             <span>${book.progress ? 'Resume · ' + Math.floor(book.progress.position / 60) + ' min' :
-              'Tap to play'}</span>
-          </div><button class="button play">Play</button></article>`).join('') :
+              'Tap to view'}</span>
+          </div><button class="button play">Open</button></article>`).join('') :
           '<div class="empty">No matching books.</div>';
-      document.querySelectorAll('.row .play').forEach(button =>
-        button.onclick = () => play(button.closest('.row').dataset.id));
+      document.querySelectorAll('.row').forEach(row => {
+        row.onclick = () => play(row.dataset.id);
+        row.querySelector('.play').onclick = event => {
+          event.stopPropagation();
+          play(row.dataset.id);
+        };
+      });
     }
     function play(id) {
       active = books.find(book => book.id === id);
       if (!active) return;
+      $('#layout').classList.add('detail-open');
+      $('#search').value = '';
       $('#heading').textContent = active.title;
-      $('#chapters').innerHTML = (active.tracks || []).flatMap(track =>
-        (track.chapters || []).map((chapter, index) =>
-          `<div class="chapter" data-track="${esc(track.id)}"
-               data-start="${Number(chapter.start) || 0}">
-            ${esc(chapter.title || ('Chapter ' + (index + 1)))}</div>`)).join('');
-      document.querySelectorAll('.chapter').forEach(element => {
-        element.onclick = () => startTrack(
-          active.tracks.find(track => track.id === element.dataset.track),
-          Number(element.dataset.start)
+      const tracks = active.tracks || [];
+      $('#detail').innerHTML = `<img class="cover" src="${esc(active.cover || '')}"
+        onerror="this.style.visibility='hidden'"><h2>${esc(active.title)}</h2>
+        <p>${esc(active.artist || 'Audiobook')} · ${tracks.length} items
+        </p>
+        ` + tracks.map(track => `<article class="content">
+          <div class="content-title">${esc(track.title || track.name)}</div>
+          <button class="link content-play" data-track="${esc(track.id)}">Play</button>
+          ${(track.chapters || []).map((chapter, index) =>
+            `<button class="link chapter" data-track="${esc(track.id)}"
+              data-start="${Number(chapter.start) || 0}">
+              ${esc(chapter.title || ('Chapter ' + (index + 1)))}</button>`).join('')}
+        </article>`).join('');
+      document.querySelectorAll('#detail .content-play').forEach(button => {
+        button.onclick = () => startTrack(tracks.find(track => track.id === button.dataset.track));
+      });
+      document.querySelectorAll('#detail .chapter').forEach(button => {
+        button.onclick = () => startTrack(
+          tracks.find(track => track.id === button.dataset.track), Number(button.dataset.start)
         );
       });
-      const resume = active.tracks.find(track => track.id === active.progress?.track_id);
-      startTrack(resume || active.tracks[0], resume ? active.progress.position : 0);
+      const resume = tracks.find(track => track.id === active.progress?.track_id);
+      if (resume) startTrack(resume, active.progress.position);
     }
     function startTrack(track, position = 0) {
       if (!track) return;
@@ -857,6 +1574,10 @@ _INDEX = r"""<!doctype html>
       } catch (error) {}
     }
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
+    $('#back').onclick = () => {
+      $('#layout').classList.remove('detail-open');
+      $('#heading').textContent = 'Your library';
+    };
     $('#search').oninput = render;
     document.addEventListener('visibilitychange', () => {
       if (document.hidden && active) {
@@ -866,6 +1587,7 @@ _INDEX = r"""<!doctype html>
       }
     });
     load();
+  </script>
 </body>
 </html>"""
 

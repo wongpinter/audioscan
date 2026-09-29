@@ -55,6 +55,7 @@ Homepage = "https://github.com/sugeng/audioscan"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/audioscan"]
+include = ["src/audioscan/static/**"]
 
 [tool.ruff]
 line-length = 100

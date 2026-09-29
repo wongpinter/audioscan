@@ -1,0 +1,38 @@
+{
+  "name": "audio",
+  "version": "1.0.0",
+  "description": "`audioscan` reads audio and audiobook metadata from local files, HTTP URLs, and Google Drive. It reports tags, duration, chapters, cover art, and transfer stats. For remote files, it uses HTTP byte ranges so it can read metadata without downloading each full file.",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc -b && vite build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wongpinter/audioscan.git"
+  },
+  "keywords": [],
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/wongpinter/audioscan/issues"
+  },
+  "homepage": "https://github.com/wongpinter/audioscan#readme",
+  "dependencies": {
+    "lucide-react": "^1.49.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "react-router-dom": "^7.18.4"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.1"
+  }
+}

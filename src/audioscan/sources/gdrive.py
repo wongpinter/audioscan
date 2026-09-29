@@ -441,6 +441,28 @@ class DriveSource:
             modified=item.get("modifiedTime"),
         )
 
+    def iter_child_directories(self, folder_id: str, prefix: str = "") -> Iterator[tuple[str, str]]:
+        """Yield immediate child folder IDs and relative paths."""
+        for folder in self._list_pages(self._folder_query(folder_id)):
+            yield str(folder["id"]), f"{prefix}{folder.get('name', '')}/"
+
+    def iter_directories(self) -> Iterator[tuple[str, str]]:
+        """Yield Drive folder IDs and relative paths in depth-first order."""
+        if not self._folder_id:
+            raise DriveError("A Drive folder ID is required for directory iteration")
+        stack = [(self._folder_id, "")]
+        while stack:
+            folder_id, prefix = stack.pop()
+            yield folder_id, prefix
+            if self._recursive:
+                stack.extend(self.iter_child_directories(folder_id, prefix))
+
+    def iter_directory_files(self, folder_id: str, prefix: str = "") -> Iterator[RemoteFile]:
+        """Yield audio files directly inside one Drive folder."""
+        for item in self._list_pages(self._audio_query(folder_id)):
+            if looks_like_audio(str(item.get("name")), self._extensions):
+                yield self._to_remote(item, prefix)
+
     def iter_files(self) -> Iterator[RemoteFile]:
         """Yield every audio file in scope, walking sub-folders when asked."""
         if self._file_id:
