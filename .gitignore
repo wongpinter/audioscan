@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+.DS_Store
+
+# local secrets / credentials
+credentials.json
+client_secret*.json
+token.json
+.service-account*.json
+
+# generated output and local reference material
+out/
+*.scan.json
+artifacts/
