@@ -406,7 +406,16 @@ def probe(
         return meta
 
     if audio is None:
-        meta.error = "unrecognised audio format"
+        suffix = Path(name or path).suffix.lower()
+        if suffix in {".m4a", ".m4b", ".m4p", ".mp4"}:
+            fileobj.seek(0)
+            header = fileobj.read(128)
+            meta.error = (
+                f"unrecognised audio format: {suffix} file has no MP4 'ftyp' signature "
+                f"in its first 128 bytes (header: {header[:16].hex()})"
+            )
+        else:
+            meta.error = "unrecognised audio format"
         return meta
 
     meta.format = _format_name(audio)

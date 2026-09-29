@@ -264,6 +264,13 @@ def test_empty_input_reports_an_error() -> None:
     assert not meta.is_ok
 
 
+def test_m4b_missing_mp4_signature_reports_header_bytes() -> None:
+    meta = probe(io.BytesIO(b"\0" * 256), name="broken.m4b")
+    assert not meta.is_ok
+    assert "no MP4 'ftyp' signature" in (meta.error or "")
+    assert "header: 00000000000000000000000000000000" in (meta.error or "")
+
+
 def test_plain_text_mp3_is_rejected() -> None:
     meta = probe(io.BytesIO(b"hello world\n" * 100), name="notes.mp3")
     assert not meta.is_ok

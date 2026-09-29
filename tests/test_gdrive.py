@@ -175,6 +175,10 @@ def test_single_file_lookup_does_not_list() -> None:
     assert [item.id for item in items] == ["x1"]
     assert items[0].size == 2048
     assert stub.list_requests == []
+    assert (
+        stub.requests[0].url.params["fields"]
+        == "id,name,mimeType,size,modifiedTime,md5Checksum,parents"
+    )
 
 
 # --------------------------------------------------------------------------- #

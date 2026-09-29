@@ -39,7 +39,7 @@ class FakeCredential:
 def fake_google(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Patch google-auth's credential factories and transport construction."""
     import google.auth
-    import google.auth.transport._http_client as transport
+    import google.auth.transport.requests as transport
     import google.oauth2.credentials as oauth_credentials
     import google.oauth2.service_account as service_account
 
@@ -190,17 +190,17 @@ def test_credentials_are_loaded_only_once(tmp_path: Path, fake_google: dict[str,
     assert fake_google["service_account"][0] == str(path)
 
 
-def test_request_adapter_is_available() -> None:
-    """The real transport factory must work without extra dependencies."""
+def test_request_adapter_supports_https() -> None:
+    """OAuth refresh uses a transport that accepts Google's HTTPS token URL."""
     from audioscan.sources.gdrive import _request_adapter
 
-    assert _request_adapter() is not None
+    assert type(_request_adapter()).__module__ == "google.auth.transport.requests"
 
 
 # --------------------------------------------------------------------------- #
 # interactive login
 # --------------------------------------------------------------------------- #
-def test_login_caches_the_token(
+def test_login_retries_without_browser_when_browser_is_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_google: dict[str, Any]
 ) -> None:
     flow_module = pytest.importorskip("google_auth_oauthlib.flow")
@@ -211,7 +211,12 @@ def test_login_caches_the_token(
             fake_google["flow"] = (str(path), tuple(scopes))
             return cls()
 
-        def run_local_server(self, port: int = 0) -> FakeCredential:
+        def run_local_server(self, port: int = 0, open_browser: bool = True) -> FakeCredential:
+            fake_google.setdefault("attempts", []).append(open_browser)
+            if open_browser:
+                from webbrowser import Error as BrowserError
+
+                raise BrowserError("could not locate runnable browser")
             fake_google["port"] = port
             return FakeCredential("browser-token")
 
@@ -224,6 +229,7 @@ def test_login_caches_the_token(
 
     assert json.loads(token.read_text())["token"] == "browser-token"
     assert auth.describe()["token_cached"] is True
+    assert fake_google["attempts"] == [True, False]
     assert fake_google["port"] == 0
     assert fake_google["flow"][0] == str(secrets)
     # A later instance loads the cached token as authorized-user credentials.

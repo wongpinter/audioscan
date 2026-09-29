@@ -73,36 +73,17 @@ def _require_google_auth() -> None:
 def _request_adapter() -> Any:
     """Build a google-auth transport ``Request`` used to refresh tokens.
 
-    google-auth ships several transports; prefer the one needing the fewest extra
-    dependencies:
-
-    1. ``google.auth.transport._http_client`` — stdlib ``http.client``, no extra
-       dependency. The module is private but has been stable for years, and a
-       token refresh is one short request, so it needs no connection pooling.
-    2. ``google.auth.transport.urllib3`` — needs ``urllib3`` plus a PoolManager.
-    3. ``google.auth.transport.requests`` — needs ``requests``.
+    Use google-auth's requests transport. It supports HTTPS, which the stdlib
+    ``http.client`` adapter does not support.
     """
     _require_google_auth()
     try:
-        from google.auth.transport._http_client import Request
+        from google.auth.transport.requests import Request
 
         return Request()
-    except Exception:  # pragma: no cover - version dependent
-        pass
-    try:
-        import urllib3
-        from google.auth.transport.urllib3 import Request as Urllib3Request
-
-        return Urllib3Request(urllib3.PoolManager())
-    except Exception:  # pragma: no cover - version dependent
-        pass
-    try:
-        from google.auth.transport.requests import Request as RequestsRequest
-
-        return RequestsRequest()
-    except Exception as exc:  # pragma: no cover - version dependent
+    except ImportError as exc:  # pragma: no cover - depends on optional packages
         raise DriveNotInstalled(
-            "no usable google-auth transport found (install urllib3 or requests)"
+            "token refresh requires the requests transport; install 'audioscan[gdrive]'"
         ) from exc
 
 
@@ -261,7 +242,16 @@ class DriveAuth:
             )
 
         flow = InstalledAppFlow.from_client_secrets_file(str(secrets_path), list(self._scopes))
-        credentials = flow.run_local_server(port=0)
+        try:
+            credentials = flow.run_local_server(port=0)
+        except Exception as exc:
+            from webbrowser import Error as BrowserError
+
+            if not isinstance(exc, BrowserError):
+                raise
+            # ponytail: retry without browser launch; manual URL works when the
+            # browser can reach this host's temporary OAuth callback port.
+            credentials = flow.run_local_server(port=0, open_browser=False)
         self._token_path.parent.mkdir(parents=True, exist_ok=True)
         self._token_path.write_text(credentials.to_json(), encoding="utf-8")
         with contextlib.suppress(OSError):
@@ -415,7 +405,10 @@ class DriveSource:
     def _get_file(self, file_id: str) -> dict[str, Any]:
         response = self._client.get(
             f"{DRIVE_API}/{file_id}",
-            params={"fields": DRIVE_FIELDS.split(",", 1)[1], "supportsAllDrives": "true"},
+            params={
+                "fields": "id,name,mimeType,size,modifiedTime,md5Checksum,parents",
+                "supportsAllDrives": "true",
+            },
             headers=self._auth.headers(),
             timeout=self._timeout,
         )

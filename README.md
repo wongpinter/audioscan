@@ -87,7 +87,7 @@ Run `audioscan --help`, `audioscan scan --help`, or `audioscan inspect --help` f
 
 Local scans recognize `.aac`, `.aif`, `.aiff`, `.ape`, `.dff`, `.dsf`, `.flac`, `.m4a`, `.m4b`, `.m4p`, `.mka`, `.mp2`, `.mp3`, `.mp4`, `.mpc`, `.oga`, `.ogg`, `.opus`, `.spx`, `.tta`, `.wav`, `.wave`, and `.wma`. Set a custom list with `--extensions`, for example `--extensions mp3,m4b,flac`.
 
-Files with partial-download suffixes such as `.part` or `.crdownload` appear in scan results and are marked as partial.
+Files with partial-download suffixes such as `.part` or `.crdownload` appear in scan results and are marked as partial. A partial audio file can fail to parse because its download stopped before the audio container finished.
 
 ## Google Drive
 
@@ -99,7 +99,7 @@ audioscan auth --status
 audioscan scan 'gdrive://FOLDER_ID' --group --stats
 ```
 
-The OAuth flow opens a browser and saves a token under `~/.config/audioscan/token.json` by default. Use `--token PATH` to select another token location. Remove the cached token with:
+The OAuth flow saves a token under `~/.config/audioscan/token.json` by default. If no browser is available, `audioscan` prints a sign-in URL. Open it in a browser that can connect to the machine running `audioscan`, because Google sends the sign-in result to that machine's temporary callback server. Use `--token PATH` to select another token location. Remove the cached token with:
 
 ```bash
 audioscan auth --logout
@@ -161,6 +161,8 @@ Exit codes: `0` means all scanned files succeeded, `1` means at least one file f
 `audioscan` uses a seekable reader with a bounded block cache. It can read file metadata stored near the start or end, including M4B files whose MP4 `moov` atom sits at the end. `--stats` shows the bytes fetched for remote files.
 
 HTTP servers must support byte-range requests when a file needs seeks beyond the first cache block. A file that fits in one block can still be scanned with a server that ignores ranges. The remote-read budget prevents a metadata probe from downloading an unexpectedly large amount of data; set `--max-fetch-mb 0` only when you accept unlimited reads.
+
+An `.m4b` or `.m4a` file that reports a missing MP4 `ftyp` signature may be incomplete or damaged. `audioscan` reports the first header bytes to help diagnose this case. It does not repair the file. Keep the original and test any repair on a separate copy.
 
 Chapter support includes ID3 `CHAP`/`CTOC`, MP4 `chpl`, and Vorbis chapter comments. QuickTime chapter tracks are not parsed. Google Docs and other non-audio Drive files are skipped. The app reads files only; it does not edit audio or Drive content.
 
