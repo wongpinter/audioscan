@@ -182,10 +182,30 @@ finally:
     reader.close()
 ```
 
+## Private audiobook web app
+
+The repository also includes an early mobile-first audiobook PWA. It uses the existing Drive range reader, puts Google credentials on the server, and saves playback positions in SQLite.
+
+Set these server environment variables before start:
+
+```sh
+APP_ALLOWED_EMAIL=you@example.com
+APP_SECRET_KEY=<random secret with at least 32 characters>
+# Generate with: openssl rand -hex 32
+APP_BASE_URL=https://books.example.com
+GOOGLE_CLIENT_SECRETS=/run/secrets/google-oauth-web.json
+AUDIOBOOKS_FOLDER_ID=<Drive folder ID>
+APP_DB_PATH=data/audiobooks.sqlite3
+```
+
+Create a Google OAuth **Web application** client. Add `APP_BASE_URL/auth/callback` as its authorized redirect URI. Enable Drive API, then start the app with `uv run audiobook-web`. Put it behind an HTTPS reverse proxy and allow only the server to read the SQLite and OAuth files. Open the URL on the phone and add it to the home screen.
+
+The initial web app supports Google sign-in for one configured email, a recursively scanned Drive folder, chapter selection, range-proxied audio, and synced progress. The deployment settings above remain user-specific and are not committed.
+
 ## Development
 
 ```bash
-uv sync --extra dev --extra gdrive
+uv sync --extra dev --extra gdrive --extra web
 uv run pytest
 uv run ruff check .
 uv run mypy src

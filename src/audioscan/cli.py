@@ -7,6 +7,7 @@ import contextlib
 import logging
 import re
 import sys
+import tempfile
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -449,7 +450,17 @@ def _write_output(path: str, text: str) -> None:
     target = Path(path).expanduser()
     if target.parent and not target.parent.exists():
         target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text, encoding="utf-8")
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=target.parent, delete=False
+        ) as temp_file:
+            temp_path = Path(temp_file.name)
+            temp_file.write(text)
+        temp_path.replace(target)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
     err_console.print(f"wrote {target}")
 
 

@@ -110,6 +110,32 @@ def test_scan_writes_report_files(
     assert len(list(csv.DictReader(io.StringIO(csv_path.read_text())))) == 3
 
 
+def test_report_write_failure_keeps_existing_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from audioscan import cli
+
+    target = tmp_path / "report.json"
+    target.write_text("old report", encoding="utf-8")
+
+    class BrokenWriter:
+        name = str(tmp_path / "temporary")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def write(self, text: str) -> None:
+            raise OSError("disk full")
+
+    monkeypatch.setattr(cli.tempfile, "NamedTemporaryFile", lambda **kwargs: BrokenWriter())
+    with pytest.raises(OSError, match="disk full"):
+        cli._write_output(str(target), "new report")
+    assert target.read_text(encoding="utf-8") == "old report"
+
+
 def test_scan_table_output(
     capsys: pytest.CaptureFixture[str], library: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

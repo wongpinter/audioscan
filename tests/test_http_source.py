@@ -6,6 +6,7 @@ import io
 import random
 from collections.abc import Iterator
 
+import httpx
 import pytest
 
 from audioscan.reader import FetchError, RangeNotSupported, ReadBudgetExceeded, SeekableBlockReader
@@ -104,6 +105,38 @@ def test_fetch_returns_exact_requested_bytes(http_server: tuple[str, ServerState
         assert fetcher.stats.requests == 2
     finally:
         fetcher.close()
+
+
+def test_partial_content_response_is_bounded_and_validated() -> None:
+    def oversized(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            206,
+            headers={"Content-Range": "bytes 10-19/50000"},
+            content=b"x" * 50000,
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(oversized))
+    fetcher = HttpRangeFetcher.open("https://example.org/audio.mp3", size=50000, client=client)
+    with pytest.raises(FetchError, match="invalid byte range"):
+        fetcher.fetch(10, 10)
+    fetcher.close()
+    client.close()
+
+
+def test_partial_content_requires_matching_content_range() -> None:
+    def mismatched(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            206,
+            headers={"Content-Range": "bytes 0-9/50000"},
+            content=b"x" * 10,
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(mismatched))
+    fetcher = HttpRangeFetcher.open("https://example.org/audio.mp3", size=50000, client=client)
+    with pytest.raises(FetchError, match="invalid byte range"):
+        fetcher.fetch(10, 10)
+    fetcher.close()
+    client.close()
 
 
 def test_fetch_past_eof_is_clamped(http_server: tuple[str, ServerState]) -> None:

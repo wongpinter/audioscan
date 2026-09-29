@@ -32,7 +32,7 @@ import httpx
 
 from ..models import SOURCE_GDRIVE
 from ..reader import DEFAULT_BLOCK_SIZE, SeekableBlockReader
-from .base import ReadableStream, RemoteFile
+from .base import AuthProvider, ReadableStream, RemoteFile
 from .http import RETRY_STATUS, HttpRangeFetcher
 from .local import AUDIO_EXTENSIONS, looks_like_audio
 
@@ -318,7 +318,7 @@ class DriveSource:
         folder_id: str | None = None,
         file_id: str | None = None,
         query: str | None = None,
-        auth: DriveAuth | None = None,
+        auth: AuthProvider | None = None,
         client: httpx.Client | None = None,
         extensions: frozenset[str] = AUDIO_EXTENSIONS,
         recursive: bool = True,
@@ -343,7 +343,7 @@ class DriveSource:
         self._client = client or httpx.Client(follow_redirects=True)
 
     @property
-    def auth(self) -> DriveAuth:
+    def auth(self) -> AuthProvider:
         """The credential provider backing this source."""
         return self._auth
 
@@ -403,20 +403,30 @@ class DriveSource:
         raise DriveError(f"Drive list request failed after retries: {last_error}")
 
     def _get_file(self, file_id: str) -> dict[str, Any]:
-        response = self._client.get(
-            f"{DRIVE_API}/{file_id}",
-            params={
-                "fields": "id,name,mimeType,size,modifiedTime,md5Checksum,parents",
-                "supportsAllDrives": "true",
-            },
-            headers=self._auth.headers(),
-            timeout=self._timeout,
-        )
-        if response.status_code >= 400:
-            raise DriveError(
-                f"Drive file lookup failed: HTTP {response.status_code}: {_error_message(response)}"
+        params = {
+            "fields": "id,name,mimeType,size,modifiedTime,md5Checksum,parents",
+            "supportsAllDrives": "true",
+        }
+        for attempt in range(2):
+            response = self._client.get(
+                f"{DRIVE_API}/{file_id}",
+                params=params,
+                headers=self._auth.headers(),
+                timeout=self._timeout,
             )
-        return response.json()
+            if response.status_code == 401 and attempt == 0:
+                self._auth.refresh()
+                continue
+            if response.status_code >= 400:
+                raise DriveError(
+                    f"Drive file lookup failed: HTTP {response.status_code}: "
+                    f"{_error_message(response)}"
+                )
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise DriveError("Drive file lookup returned an unexpected payload")
+            return payload
+        raise DriveError("Drive file lookup failed after credential refresh")
 
     def _to_remote(self, item: dict[str, Any], prefix: str) -> RemoteFile:
         name = str(item.get("name") or item.get("id") or "")

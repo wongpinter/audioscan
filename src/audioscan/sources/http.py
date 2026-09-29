@@ -181,11 +181,41 @@ class HttpRangeFetcher:
             status = response.status_code
             retry_after = _retry_after_seconds(response.headers.get("retry-after"))
             if status == 206:
-                return response.read(), status, retry_after
+                content_length = response.headers.get("content-length")
+                if content_length and content_length.isdigit() and int(content_length) > wanted:
+                    raise FetchError(
+                        f"{self.name}: invalid byte range response exceeds {wanted} bytes"
+                    )
+                remaining = wanted + 1
+                chunks: list[bytes] = []
+                if response.is_stream_consumed:
+                    chunks.append(response.content[:remaining])
+                else:
+                    for chunk in response.iter_raw(_CHUNK):
+                        chunks.append(chunk[:remaining])
+                        remaining -= len(chunk)
+                        if remaining <= 0:
+                            break
+                data = b"".join(chunks)
+                if len(data) > wanted:
+                    raise FetchError(
+                        f"{self.name}: server returned more than the requested {wanted} bytes"
+                    )
+                match = _CONTENT_RANGE_RE.fullmatch(response.headers.get("content-range", ""))
+                requested = re.fullmatch(r"bytes=(\d+)-(\d+)", headers["Range"])
+                if (
+                    len(data) != wanted
+                    or match is None
+                    or requested is None
+                    or (int(match["start"]), int(match["end"]))
+                    != (int(requested[1]), int(requested[2]))
+                ):
+                    raise FetchError(f"{self.name}: server returned an invalid byte range")
+                return data, status, retry_after
             if status == 200:
                 # The server ignored Range. Read only what was asked for and let
                 # the connection close early rather than pulling the whole file.
-                chunks: list[bytes] = []
+                chunks = []
                 received = 0
                 for chunk in response.iter_bytes(_CHUNK):
                     chunks.append(chunk)

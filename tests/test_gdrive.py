@@ -181,6 +181,22 @@ def test_single_file_lookup_does_not_list() -> None:
     )
 
 
+def test_single_file_lookup_refreshes_expired_token() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request, params: dict[str, str]) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(401, json={"error": {"message": "Invalid Credentials"}})
+        return httpx.Response(200, json={"id": "x1", "name": "book.m4b"})
+
+    source, auth = make_source(DriveStub(handler), file_id="x1")
+    assert [item.id for item in source.iter_files()] == ["x1"]
+    assert calls == 2
+    assert auth.refreshes == 1
+
+
 # --------------------------------------------------------------------------- #
 # media access
 # --------------------------------------------------------------------------- #
