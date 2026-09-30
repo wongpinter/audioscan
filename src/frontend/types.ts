@@ -19,6 +19,7 @@ export type Book = {
   directory?: string | null
   cover?: string | null
   duration: number
+  added_at?: string
   tracks: Track[]
   progress?: Progress | null
 }
