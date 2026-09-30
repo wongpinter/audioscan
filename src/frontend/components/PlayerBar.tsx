@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { LoaderCircle, Moon, Pause, Play, SkipBack, SkipForward, Volume2 } from 'lucide-react'
 import type { Book, Track } from '../types'
 import { Cover, IconButton } from './ui'
@@ -107,7 +107,7 @@ export function PlayerBar({ book, track, start, onNext, onPrevious, onTime, onCh
       <IconButton aria-label={buffering ? 'Buffering audio' : playing ? 'Pause' : 'Play'} className="play-toggle" disabled={!track || buffering} onClick={() => { const p = audio.current; if (p?.paused) void p.play(); else p?.pause() }}>{buffering ? <LoaderCircle className="spin" size={18} /> : playing ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}</IconButton>
       <IconButton aria-label="Next track" onClick={onNext}><SkipForward size={18} /></IconButton>
     </div>
-    <div className="player-timeline"><span>{formatTime(time)}</span><input aria-label="Playback position" type="range" min="0" max={duration || 100} value={Math.min(time, duration || 100)} onChange={event => { if (audio.current) audio.current.currentTime = Number(event.target.value) }} /><span>{formatTime(duration)}</span></div>
+    <div className="player-timeline"><span>{formatTime(time)}</span><input aria-label="Playback position" aria-valuetext={`${formatTime(time)} of ${formatTime(duration)}`} type="range" min="0" max={duration || 100} value={Math.min(time, duration || 100)} style={{ '--played': `${duration ? Math.min(100, time / duration * 100) : 0}%` } as CSSProperties} onChange={event => { if (audio.current) audio.current.currentTime = Number(event.target.value) }} /><span>{formatTime(duration)}</span></div>
     <Volume2 className="volume-icon" size={18} />
   </footer>
 }
