@@ -36,15 +36,24 @@ function App() {
   const navigate = useNavigate()
   const progressState = useRef({ lastSentAt: 0, latest: null as { bookId: string; trackId: string; position: number } | null })
   const prefetchedTracks = useRef(new Set<string>())
+  const currentListen = useRef<{ bookId: string; trackId: string } | null>(null)
 
   const load = useCallback(async () => {
     try {
-      const result = await api<Book[]>('/api/library')
+      const [result, recent] = await Promise.all([api<Book[]>('/api/library'), api<Features>('/api/features')])
       setBooks(result)
+      const lastPlayed = recent.history[0]?.book_id
+      let saved: { bookId: string; trackId: string; position: number } | null = null
+      try { saved = JSON.parse(localStorage.getItem('ruangdengar.last-listening') || 'null') } catch { /* storage can be disabled */ }
+      const savedBook = saved && result.find(item => item.id === saved?.bookId && item.tracks.some(track => track.id === saved?.trackId))
       let pending: { bookId: string; trackId: string; position: number } | null = null
       try { pending = JSON.parse(localStorage.getItem('ruangdengar.pending-progress') || 'null') } catch { /* storage can be disabled */ }
-      const recover = pending && result.find(book => book.id === pending?.bookId && book.tracks.some(track => track.id === pending?.trackId))
-      setResumeBook(current => current ?? recover ?? result.find(book => (book.progress?.position ?? 0) > 0 && book.tracks.some(track => track.id === book.progress?.track_id)) ?? null)
+      const book = savedBook || result.find(item => item.id === lastPlayed)
+      const pendingMatchesSaved = !!(saved && pending?.bookId === saved.bookId && pending.trackId === saved.trackId)
+      const recovery = savedBook
+        ? { ...savedBook, progress: { track_id: saved!.trackId, position: pendingMatchesSaved ? pending!.position : saved!.position } }
+        : book?.progress?.track_id ? book : result.find(item => (item.progress?.position ?? 0) > 0 && item.tracks.some(track => track.id === item.progress?.track_id))
+      setResumeBook(recovery || null)
       result.filter(book => (book.progress?.position ?? 0) > 0).slice(0, 3).forEach(book => { const track = book.tracks.find(item => item.id === book.progress?.track_id); if (track) void fetch(`/api/tracks/${encodeURIComponent(track.id)}/warm`, { method: 'POST', credentials: 'same-origin' }).catch(() => {}) })
       setError('')
     } catch (e) { setError(e instanceof Error ? e.message : 'Could not load library.') }
@@ -98,6 +107,9 @@ function App() {
       : sortBy === 'duration' ? b.duration - a.duration : sortBy === 'rating' ? (features.ratings[b.id] ?? 0) - (features.ratings[a.id] ?? 0) : a.title.localeCompare(b.title)),
   [books, filter, statusFilter, sortBy, features, favoritesOnly, playlistView])
   const play = (book: Book, track: Track, start = 0) => {
+    currentListen.current = { bookId: book.id, trackId: track.id }
+    try { localStorage.setItem('ruangdengar.last-listening', JSON.stringify({ bookId: book.id, trackId: track.id, position: start })) } catch { /* storage can be disabled */ }
+    setResumeBook(null)
     void fetch(`/api/history/${encodeURIComponent(book.id)}`, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ track_id: track.id }) })
     void fetch(`/api/tracks/${encodeURIComponent(track.id)}/warm`, { method: 'POST', credentials: 'same-origin' }).catch(() => {})
     setActiveBook(book); setActiveTrack(track); setStartAt(start)
@@ -138,6 +150,9 @@ function App() {
     }
     if (!activeBook || !activeTrack || time <= 0) return
     const checkpoint = { bookId: activeBook.id, trackId: activeTrack.id, position: Math.floor(time) }
+    if (currentListen.current?.bookId === checkpoint.bookId && currentListen.current.trackId === checkpoint.trackId) {
+      try { localStorage.setItem('ruangdengar.last-listening', JSON.stringify(checkpoint)) } catch { /* storage can be disabled */ }
+    }
     progressState.current.latest = checkpoint
     try { localStorage.setItem('ruangdengar.pending-progress', JSON.stringify(checkpoint)) } catch { /* storage can be disabled */ }
     if (!force && Date.now() - progressState.current.lastSentAt < 15_000) return
