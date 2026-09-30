@@ -196,11 +196,14 @@ APP_BASE_URL=https://books.example.com
 GOOGLE_CLIENT_SECRETS=/run/secrets/google-oauth-web.json
 AUDIOBOOKS_FOLDER_ID=<Drive folder ID>
 APP_DB_PATH=data/audiobooks.sqlite3
+APP_CACHE_PATH=data/media-cache
+APP_CACHE_MAX_BYTES=32212254720
+APP_CACHE_WARM_ENABLED=true
 ```
 
 Create a Google OAuth **Web application** client. Add `APP_BASE_URL/auth/callback` as its authorized redirect URI. Enable Drive API, then start the app with `uv run audiobook-web`. Put it behind an HTTPS reverse proxy and allow only the server to read the SQLite and OAuth files. Open the URL on the phone and add it to the home screen.
 
-The web app supports Google sign-in for one configured email, background Drive scans with progress, lazy chapter browsing, and authenticated range-proxied playback. SQLite syncs saved position, favorites, ratings, tags, playlists, recent listening history, and excluded Drive folders across devices. Library tools include search, status/favorite/tag/playlist filters, sorting, Continue Listening, storage summaries, chapter selection, a Browse by switch for artist/directory/album with nested group pages, and a Settings page to exclude scanned directories. The list comes from indexed media paths and does not call Drive, avoiding Drive query quota use. Saving exclusions immediately removes matching tracks and associated progress, favorites, ratings, tags, and playlist entries from SQLite. New scans skip those path prefixes. Feature tables persist across library rescans. The deployment settings above remain user-specific and are not committed.
+The web app supports Google sign-in for one configured email, background Drive scans with progress, lazy chapter browsing, and authenticated range-proxied playback. Playback progress checkpoints every 15 seconds, retries from browser storage after reconnect, and offers resume after refresh. A private local cache defaults to a 30 GiB LRU cap. Cached files use Google Drive MD5 checksums and atomic writes; cold cache misses keep streaming from Drive. Set `APP_CACHE_WARM_ENABLED=false` to disable background warming. The app cache directory is private to the app process; Caddy does not share its volume, so cached bytes still pass through Python. SQLite syncs saved position, favorites, ratings, tags, playlists, recent listening history, and excluded Drive folders across devices. Library tools include search, status/favorite/tag/playlist filters, sorting, Continue Listening, storage summaries, chapter selection, a Browse by switch for artist/directory/album with nested group pages, and a Settings page to exclude scanned directories. The list comes from indexed media paths and does not call Drive, avoiding Drive query quota use. Saving exclusions immediately removes matching tracks and associated progress, favorites, ratings, tags, and playlist entries from SQLite. New scans skip those path prefixes. Feature tables persist across library rescans. The deployment settings above remain user-specific and are not committed.
 
 ## Development
 

@@ -23,6 +23,7 @@ class RemoteFile:
     size: int | None = None
     mime_type: str | None = None
     modified: str | None = None
+    md5: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

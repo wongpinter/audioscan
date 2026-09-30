@@ -439,6 +439,7 @@ class DriveSource:
             size=size,
             mime_type=item.get("mimeType"),
             modified=item.get("modifiedTime"),
+            md5=item.get("md5Checksum"),
         )
 
     def iter_child_directories(self, folder_id: str, prefix: str = "") -> Iterator[tuple[str, str]]:

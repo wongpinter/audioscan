@@ -196,6 +196,8 @@ code, .nav-label, .scan-current, .chapter-time, .track-index, .chapter-number, .
 .filter-panel .sort-control { flex: none; }
 .home-greeting h1,.search-page h1,.library-page .hero h1,.book-info h1,.section-heading h2,.tracks-heading h2 { font-family: "Avenir Next", Avenir, "Segoe UI", sans-serif; }
 .home-greeting h1,.book-info h1 { font-family: Georgia, "Charter", "Palatino Linotype", serif; letter-spacing: -.7px; }
+.resume-player,.play-retry { position: fixed; z-index: 33; right: 14px; bottom: calc(166px + env(safe-area-inset-bottom)); min-height: 40px; padding: 8px 13px; border: 2px solid var(--ink); border-radius: 999px; color: var(--ink); background: var(--yellow); box-shadow: 3px 3px 0 var(--ink); font-size: 12px; font-weight: 800; }
+.play-retry { bottom: calc(105px + env(safe-area-inset-bottom)); background: var(--pink); }
 @media (max-width: 760px) {
   .bottom-navigation { inset: auto 0 0; z-index: 31; padding-bottom: calc(6px + env(safe-area-inset-bottom)); }
   .player-bar { inset: auto 0 calc(60px + env(safe-area-inset-bottom)); z-index: 32; }

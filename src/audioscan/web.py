@@ -40,6 +40,90 @@ from .sources.http import HttpRangeFetcher
 logger = logging.getLogger(__name__)
 
 
+class MediaCache:
+    """Bounded cache for complete Drive media files."""
+
+    def __init__(self, path: Path, max_bytes: int) -> None:
+        self.path = path
+        self.max_bytes = max(0, max_bytes)
+        self.lock = threading.RLock()
+        self.path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.path.chmod(0o700)
+
+    @staticmethod
+    def _key(track: dict[str, Any]) -> str:
+        identity = str(track.get("md5") or f"{track['id']}-{track.get('modified') or 'unknown'}")
+        suffix = Path(str(track["name"])).suffix.lower()
+        suffix = suffix if re.fullmatch(r"\.[a-z0-9]{1,8}", suffix) else ".audio"
+        return f"{track['id']}-{identity}{suffix}"
+
+    def file(self, track: dict[str, Any]) -> Path | None:
+        path = self.path / self._key(track)
+        try:
+            if path.stat().st_size != int(track.get("size") or 0):
+                return None
+            os.utime(path, None)
+            return path
+        except OSError:
+            return None
+
+    def put(self, track: dict[str, Any], chunks: Iterator[bytes]) -> Path | None:
+        size = int(track.get("size") or 0)
+        if self.max_bytes <= 0 or size <= 0 or size > self.max_bytes:
+            return None
+        target = self.path / self._key(track)
+        temp = self.path / f".{target.name}.{secrets.token_hex(8)}.part"
+        try:
+            with self.lock, temp.open("xb") as output:
+                for chunk in chunks:
+                    output.write(chunk)
+                os.fchmod(output.fileno(), 0o600)
+                output.flush()
+                os.fsync(output.fileno())
+                if temp.stat().st_size != size:
+                    return None
+                temp.replace(target)
+                self._evict(target)
+                return target
+        except (OSError, FetchError):
+            logger.info(
+                "Media cache fill failed track=%s", track.get("id"), exc_info=True
+            )
+            return None
+        finally:
+            temp.unlink(missing_ok=True)
+
+    def _evict(self, newest: Path) -> None:
+        files = sorted(
+            (
+                path
+                for path in self.path.iterdir()
+                if path.is_file() and not path.name.endswith(".part")
+            ),
+            key=lambda path: path.stat().st_atime,
+        )
+        total = sum(path.stat().st_size for path in files)
+        for path in files:
+            if total <= self.max_bytes:
+                break
+            if path == newest:
+                continue
+            size = path.stat().st_size
+            path.unlink(missing_ok=True)
+            total -= size
+
+    def serve(self, path: Path, start: int, length: int) -> Iterator[bytes]:
+        with path.open("rb") as source:
+            source.seek(start)
+            remaining = length
+            while remaining:
+                chunk = source.read(min(256 * 1024, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+
+
 class WebConfig:
     def __init__(self) -> None:
         self.allowed_email = os.getenv("APP_ALLOWED_EMAIL", "").strip().lower()
@@ -53,6 +137,15 @@ class WebConfig:
         self.folder_id = os.getenv("AUDIOBOOKS_FOLDER_ID", "")
         self.db_path = Path(os.getenv("APP_DB_PATH", "data/audiobooks.sqlite3"))
         self.credentials_path = self.db_path.with_name("credentials.json")
+        self.cache_path = Path(
+            os.getenv("APP_CACHE_PATH", str(self.db_path.parent / "media-cache"))
+        )
+        self.cache_max_bytes = max(
+            0, int(os.getenv("APP_CACHE_MAX_BYTES", str(30 * 1024**3)))
+        )
+        self.cache_warm_enabled = (
+            os.getenv("APP_CACHE_WARM_ENABLED", "true").lower() == "true"
+        )
 
     def check(self) -> None:
         if not self.require_https:
@@ -680,6 +773,8 @@ class LibraryScanner:
             "name": remote.name,
             "size": remote.size,
             "mime_type": remote.mime_type,
+            "modified": remote.modified,
+            "md5": remote.md5,
             "meta": track.to_dict(),
             "error": error,
         }
@@ -727,6 +822,8 @@ class LibraryScanner:
                     "name": original["name"],
                     "path": original["path"],
                     "size": original["size"] or 0,
+                    "md5": original.get("md5"),
+                    "modified": original.get("modified"),
                     "mime_type": original["mime_type"],
                     "album": meta.get("album"),
                     "title": meta.get("title") or original["name"],
@@ -756,11 +853,65 @@ class LibraryScanner:
         logger.info("Drive scan checkpoint committed books=%d tracks=%d", len(books), len(tracks))
 
 
+
 def create_app(config: WebConfig | None = None, db: Database | None = None) -> FastAPI:
     config = config or WebConfig()
     if not config.secret:
         config.secret = "development-only-change-me-set-APP_SECRET_KEY"
     db = db or Database(config.db_path)
+    cache = MediaCache(config.cache_path, config.cache_max_bytes)
+    cache_warm_slots = threading.BoundedSemaphore(2)
+
+    def warm_track(track: dict[str, Any]) -> None:
+        if cache.file(track) is not None:
+            return
+        client = httpx.Client(follow_redirects=True)
+        try:
+            auth = StoredDriveAuth(db, config.credentials_path)
+            url = f"{DRIVE_API}/{track['id']}?alt=media&supportsAllDrives=true"
+            fetcher = HttpRangeFetcher.open(
+                url,
+                size=int(track["size"]),
+                client=client,
+                auth=auth,
+                name=track["name"],
+            )
+            reader = SeekableBlockReader(
+                fetcher, block_size=256 * 1024, name=track["name"]
+            )
+            try:
+                def chunks() -> Iterator[bytes]:
+                    while chunk := reader.read(256 * 1024):
+                        yield chunk
+
+                cache.put(track, chunks())
+            finally:
+                reader.close()
+        except Exception:
+            logger.info(
+                "Media warm failed track=%s", track.get("id"), exc_info=True
+            )
+        finally:
+            client.close()
+            cache_warm_slots.release()
+
+    def schedule_warm(track: dict[str, Any]) -> bool:
+        if not config.cache_warm_enabled or cache.file(track) is not None:
+            return True
+        if not cache_warm_slots.acquire(blocking=False):
+            return False
+        threading.Thread(
+            target=warm_track,
+            args=(track,),
+            name="media-cache-warm",
+            daemon=True,
+        ).start()
+        return True
+
+    try:
+        cache._evict(Path())
+    except OSError:
+        logger.info("Media cache startup eviction failed", exc_info=True)
     app = FastAPI(title="Audiobooks")
     app.add_middleware(
         SessionMiddleware,
@@ -1236,6 +1387,16 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
             headers={"Content-Length": str(size), "Accept-Ranges": "bytes"},
         )
 
+    @app.post("/api/tracks/{track_id}/warm", status_code=202)
+    def warm_audio(track_id: str, request: Request) -> Response:
+        user(request)
+        track = db.track(track_id)
+        if track is None:
+            raise HTTPException(404, "Track not found")
+        if not schedule_warm(track):
+            return Response(status_code=204)
+        return Response(status_code=202)
+
     @app.get("/api/tracks/{track_id}/audio")
     def audio(track_id: str, request: Request) -> Response:
         user(request)
@@ -1252,6 +1413,25 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
                 status_code=416,
                 headers={"Content-Range": f"bytes */{size}", "Accept-Ranges": "bytes"},
             )
+        cached = cache.file(track)
+        mime = _mime_type(track)
+        if cached is not None:
+            length = end - start + 1
+            headers = {
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(length),
+                "Cache-Control": "private, no-store",
+            }
+            status = 200
+            if start != 0 or end != size - 1:
+                headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+                status = 206
+            return StreamingResponse(
+                cache.serve(cached, start, length),
+                status_code=status,
+                media_type=mime,
+                headers=headers,
+            )
         auth = StoredDriveAuth(db, config.credentials_path)
         client = httpx.Client(follow_redirects=True)
         url = f"{DRIVE_API}/{track_id}?alt=media&supportsAllDrives=true"
@@ -1264,11 +1444,13 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
             client.close()
             raise
         length = end - start + 1
+        full_read = start == 0 and end == size - 1 and size <= cache.max_bytes
 
         def chunks() -> Iterator[bytes]:
             drive_read_ms = 0.0
             drive_reads = 0
             bytes_yielded = 0
+            cached_chunks: list[bytes] = []
             try:
                 reader.seek(start)
                 remaining = length
@@ -1281,7 +1463,11 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
                     drive_reads += 1
                     bytes_yielded += len(chunk)
                     remaining -= len(chunk)
+                    if full_read:
+                        cached_chunks.append(chunk)
                     yield chunk
+                if full_read and bytes_yielded == size:
+                    cache.put(track, iter(cached_chunks))
             except FetchError as exc:
                 raise HTTPException(502, f"Drive audio stream failed: {exc}") from exc
             finally:

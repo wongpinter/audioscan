@@ -32,12 +32,20 @@ function App() {
   const [activeBook, setActiveBook] = useState<Book | null>(null)
   const [activeTrack, setActiveTrack] = useState<Track | null>(null)
   const [startAt, setStartAt] = useState(0)
+  const [resumeBook, setResumeBook] = useState<Book | null>(null)
   const navigate = useNavigate()
+  const progressState = useRef({ lastSentAt: 0, latest: null as { bookId: string; trackId: string; position: number } | null })
+  const prefetchedTracks = useRef(new Set<string>())
 
   const load = useCallback(async () => {
     try {
       const result = await api<Book[]>('/api/library')
       setBooks(result)
+      let pending: { bookId: string; trackId: string; position: number } | null = null
+      try { pending = JSON.parse(localStorage.getItem('audioscan.pending-progress') || 'null') } catch { /* storage can be disabled */ }
+      const recover = pending && result.find(book => book.id === pending?.bookId && book.tracks.some(track => track.id === pending?.trackId))
+      setResumeBook(current => current ?? recover ?? result.find(book => (book.progress?.position ?? 0) > 0 && book.tracks.some(track => track.id === book.progress?.track_id)) ?? null)
+      result.filter(book => (book.progress?.position ?? 0) > 0).slice(0, 3).forEach(book => { const track = book.tracks.find(item => item.id === book.progress?.track_id); if (track) void fetch(`/api/tracks/${encodeURIComponent(track.id)}/warm`, { method: 'POST', credentials: 'same-origin' }).catch(() => {}) })
       setError('')
     } catch (e) { setError(e instanceof Error ? e.message : 'Could not load library.') }
     finally { setLoading(false) }
@@ -91,6 +99,7 @@ function App() {
   [books, filter, statusFilter, sortBy, features, favoritesOnly, playlistView])
   const play = (book: Book, track: Track, start = 0) => {
     void fetch(`/api/history/${encodeURIComponent(book.id)}`, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ track_id: track.id }) })
+    void fetch(`/api/tracks/${encodeURIComponent(track.id)}/warm`, { method: 'POST', credentials: 'same-origin' }).catch(() => {})
     setActiveBook(book); setActiveTrack(track); setStartAt(start)
     void loadFeatures()
   }
@@ -118,12 +127,46 @@ function App() {
     try { const result = await api<{ book_ids: string[] }>(`/api/playlists/${playlistId}/books`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ book_ids: [...playlist.book_ids, bookId] }) }); setFeatures(previous => ({ ...previous, playlists: previous.playlists.map(item => item.id === playlistId ? { ...item, book_ids: result.book_ids } : item) })) }
     catch (e) { setFeatureError(e instanceof Error ? e.message : 'Could not update playlist.') }
   }
-  const saveProgress = useCallback((time: number) => {
-    if (activeBook && activeTrack && time > 0) void fetch(`/api/progress/${encodeURIComponent(activeBook.id)}`, {
-      method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ track_id: activeTrack.id, position: time }),
-    })
+  const saveProgress = useCallback((time: number, force = false) => {
+    if (activeBook && activeTrack?.duration && time / activeTrack.duration >= 0.8) {
+      const index = activeBook.tracks.findIndex(track => track.id === activeTrack.id)
+      const next = activeBook.tracks[index + 1]
+      if (next && !prefetchedTracks.current.has(next.id)) {
+        prefetchedTracks.current.add(next.id)
+        void fetch(`/api/tracks/${encodeURIComponent(next.id)}/warm`, { method: 'POST', credentials: 'same-origin' }).catch(() => {})
+      }
+    }
+    if (!activeBook || !activeTrack || time <= 0) return
+    const checkpoint = { bookId: activeBook.id, trackId: activeTrack.id, position: Math.floor(time) }
+    progressState.current.latest = checkpoint
+    try { localStorage.setItem('audioscan.pending-progress', JSON.stringify(checkpoint)) } catch { /* storage can be disabled */ }
+    if (!force && Date.now() - progressState.current.lastSentAt < 15_000) return
+    progressState.current.lastSentAt = Date.now()
+    void fetch(`/api/progress/${encodeURIComponent(checkpoint.bookId)}`, { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ track_id: checkpoint.trackId, position: checkpoint.position }) }).then(response => {
+      if (!response.ok) throw new Error(`Progress save failed: ${response.status}`)
+      if (progressState.current.latest === checkpoint) { try { localStorage.removeItem('audioscan.pending-progress') } catch { /* storage can be disabled */ } }
+    }).catch(() => {})
   }, [activeBook, activeTrack])
+  useEffect(() => {
+    const flush = () => {
+      const checkpoint = progressState.current.latest
+      if (!checkpoint) return
+      const body = JSON.stringify({ track_id: checkpoint.trackId, position: checkpoint.position })
+      if (navigator.sendBeacon?.(`/api/progress/${encodeURIComponent(checkpoint.bookId)}`, new Blob([body], { type: 'application/json' }))) return
+      void fetch(`/api/progress/${encodeURIComponent(checkpoint.bookId)}`, { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body, keepalive: true }).catch(() => {})
+    }
+    const retry = () => {
+      let pending: { bookId: string; trackId: string; position: number } | null = null
+      try { pending = JSON.parse(localStorage.getItem('audioscan.pending-progress') || 'null') } catch { return }
+      if (!pending) return
+      void fetch(`/api/progress/${encodeURIComponent(pending.bookId)}`, { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ track_id: pending.trackId, position: pending.position }) }).then(response => { if (response.ok) localStorage.removeItem('audioscan.pending-progress') }).catch(() => {})
+    }
+    window.addEventListener('pagehide', flush)
+    window.addEventListener('online', retry)
+    document.addEventListener('visibilitychange', flush)
+    retry()
+    return () => { window.removeEventListener('pagehide', flush); window.removeEventListener('online', retry); document.removeEventListener('visibilitychange', flush) }
+  }, [])
 
   const openBook = (book: Book) => navigate(`/book/${encodeURIComponent(book.id)}`)
   const playBook = (book: Book) => { const track = book.tracks[0]; if (track) play(book, track, book.progress?.track_id === track.id ? book.progress.position : 0) }
@@ -144,7 +187,8 @@ function App() {
       <Route path="*" element={<div className="empty-state">Page not found.</div>} />
     </Routes></main>
     <BottomNavigation />
-    <PlayerBar book={activeBook} track={activeTrack} start={startAt} onNext={() => moveTrack(1)} onPrevious={() => moveTrack(-1)} onTime={saveProgress} />
+    {resumeBook && !activeTrack && <button className="resume-player" onClick={() => { const track = resumeBook.tracks.find(item => item.id === resumeBook.progress?.track_id); if (track) { play(resumeBook, track, resumeBook.progress?.position ?? 0); setResumeBook(null) } }}>Resume listening · {resumeBook.title}</button>}
+    <PlayerBar book={activeBook} track={activeTrack} start={startAt} onNext={() => moveTrack(1)} onPrevious={() => moveTrack(-1)} onTime={saveProgress} onCheckpoint={time => saveProgress(time, true)} />
   </div>
 }
 

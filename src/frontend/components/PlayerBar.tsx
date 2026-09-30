@@ -3,11 +3,12 @@ import { LoaderCircle, Pause, Play, SkipBack, SkipForward, Volume2 } from 'lucid
 import type { Book, Track } from '../types'
 import { Cover, IconButton } from './ui'
 
-type Props = { book: Book | null; track: Track | null; start: number; onNext: () => void; onPrevious: () => void; onTime: (time: number) => void }
+type Props = { book: Book | null; track: Track | null; start: number; onNext: () => void; onPrevious: () => void; onTime: (time: number) => void; onCheckpoint: (time: number) => void }
 
-export function PlayerBar({ book, track, start, onNext, onPrevious, onTime }: Props) {
+export function PlayerBar({ book, track, start, onNext, onPrevious, onTime, onCheckpoint }: Props) {
   const audio = useRef<HTMLAudioElement>(null)
   const [playing, setPlaying] = useState(false)
+  const [playError, setPlayError] = useState(false)
   const [buffering, setBuffering] = useState(false)
   const [time, setTime] = useState(0)
   const [duration, setDuration] = useState(0)
@@ -34,11 +35,11 @@ export function PlayerBar({ book, track, start, onNext, onPrevious, onTime }: Pr
         void fetch(`/api/tracks/${encodeURIComponent(track.id)}/playback-metrics`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(snapshot), keepalive: true })
       }
     }
-    const seek = () => { player.currentTime = start; void player.play().catch(() => setBuffering(false)) }
+    const seek = () => { player.currentTime = start; setPlayError(false); void player.play().then(() => setPlayError(false)).catch(() => { setBuffering(false); setPlayError(true) }) }
     const bufferingStart = () => { state.stalls += 1; setBuffering(true); report(true) }
     const bufferingEnd = () => { setBuffering(false); report(true) }
     const playbackStarted = () => { if (!state.startedAt) state.startedAt = performance.now(); report(true) }
-    const loadFailed = () => { setBuffering(false); report(true) }
+    const loadFailed = () => { setBuffering(false); setPlayError(true); report(true) }
     const observeResources = new PerformanceObserver(list => {
       for (const entry of list.getEntries() as PerformanceResourceTiming[]) {
         if (!entry.name.includes(`/api/tracks/${encodeURIComponent(track.id)}/audio`)) continue
@@ -71,7 +72,8 @@ export function PlayerBar({ book, track, start, onNext, onPrevious, onTime }: Pr
     }
   }, [track?.id, start])
   return <footer className="player-bar">
-    <audio ref={audio} preload="metadata" onTimeUpdate={event => { const player = event.currentTarget; const value = player.currentTime; setTime(value); onTime(value); const ahead = player.buffered.length ? Math.max(0, player.buffered.end(player.buffered.length - 1) - value) : 0; setMetrics(current => ({ ...current, bufferedAhead: Math.round(ahead) })) }} onDurationChange={event => setDuration(event.currentTarget.duration || 0)} onEnded={onNext} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} />
+    <audio ref={audio} preload="metadata" onTimeUpdate={event => { const player = event.currentTarget; const value = player.currentTime; setTime(value); onTime(value); const ahead = player.buffered.length ? Math.max(0, player.buffered.end(player.buffered.length - 1) - value) : 0; setMetrics(current => ({ ...current, bufferedAhead: Math.round(ahead) })) }} onDurationChange={event => setDuration(event.currentTarget.duration || 0)} onEnded={event => { onCheckpoint(event.currentTarget.currentTime); onNext() }} onPause={event => { onCheckpoint(event.currentTarget.currentTime); setPlaying(false) }} onPlay={() => setPlaying(true)} />
+    {playError && <button className="play-retry" onClick={() => { const player = audio.current; if (!player) return; const position = player.currentTime || start; player.src = `/api/tracks/${encodeURIComponent(track?.id ?? '')}/audio`; player.load(); player.addEventListener('loadedmetadata', () => { player.currentTime = position; void player.play().then(() => setPlayError(false)).catch(() => setPlayError(true)) }, { once: true }) }}>Retry audio</button>}
     {import.meta.env.DEV && <output className="playback-metrics">Start {metrics.startupMs} ms · stalls {metrics.stalls} · buffer {metrics.bufferedAhead}s · Drive {metrics.rangeMs} ms / {metrics.ranges} ranges / {metrics.rangeBytes} B</output>}
     <div className="player-track">{book?.cover && <Cover src={book.cover} alt="" />}
       <div className="player-label"><strong>{track?.title ?? 'Choose a book'}</strong><span>{buffering ? 'Buffering audio…' : book?.title ?? 'Audiobooks'}</span></div>

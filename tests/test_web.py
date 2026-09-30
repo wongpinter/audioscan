@@ -21,6 +21,8 @@ def config(tmp_path: Path) -> WebConfig:
     result.client_secrets = tmp_path / "client.json"
     result.folder_id = "folder-id"
     result.db_path = tmp_path / "library.sqlite3"
+    result.cache_path = tmp_path / "media-cache"
+    result.cache_max_bytes = 1024
     return result
 
 
@@ -42,6 +44,24 @@ def test_deployment_settings_require_https_long_secret_and_root_folder(tmp_path:
     cfg.folder_id = ""
     with pytest.raises(RuntimeError, match="AUDIOBOOKS_FOLDER_ID"):
         cfg.check()
+
+
+def test_media_cache_uses_md5_and_evicts_oldest(tmp_path: Path) -> None:
+    from audioscan.web import MediaCache
+
+    cache = MediaCache(tmp_path / "cache", max_bytes=8)
+    first = {"id": "one", "name": "one.m4b", "md5": "abc", "modified": "today", "size": 5}
+    second = {"id": "two", "name": "two.mp3", "md5": "def", "modified": "today", "size": 5}
+    path = cache.put(first, iter([b"12345"]))
+    assert path is not None and cache.file(first) == path
+    assert next(cache.serve(path, 1, 3)) == b"234"
+    cache.put(second, iter([b"abcde"]))
+    assert cache.file(second) is not None
+    assert cache.file(first) is None
+    assert cache.file({**second, "md5": "xyz"}) is None
+    partial = {**second, "id": "partial", "md5": "partial"}
+    assert cache.put(partial, iter([b"abc"])) is None
+    assert cache.file(partial) is None
 
 
 def test_range_header_supports_byte_and_suffix_ranges() -> None:
@@ -249,6 +269,29 @@ def test_progress_requires_valid_book_track_and_position(tmp_path: Path) -> None
     assert db.library()[0]["progress"]["position"] == 12.5
 
 
+def test_audio_cache_hit_serves_ranges_without_drive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from audioscan.web import MediaCache
+
+    cfg = config(tmp_path)
+    db = seeded_db(cfg.db_path)
+    cache = MediaCache(cfg.cache_path, cfg.cache_max_bytes)
+    track = db.track("drive-track")
+    assert track is not None
+    cache.put(track, iter([b"0123456789abcdef"]))
+
+    def fail_if_drive(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("Drive must not be called on a cache hit")
+
+    import audioscan.web as web
+    monkeypatch.setattr(web.HttpRangeFetcher, "open", fail_if_drive)
+    client = TestClient(create_app(cfg, db))
+    sign_in(client)
+    response = client.get("/api/tracks/drive-track/audio", headers={"Range": "bytes=4-7"})
+    assert response.status_code == 206
+    assert response.content == b"4567"
+    assert response.headers["content-range"] == "bytes 4-7/16"
+
+
 def test_audio_endpoint_proxies_only_requested_range(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -272,11 +315,10 @@ def test_audio_endpoint_proxies_only_requested_range(
     monkeypatch.setattr(web.httpx, "Client", FakeClient)
     client = TestClient(create_app(cfg, db))
     sign_in(client)
-    response = client.get("/api/tracks/drive-track/audio", headers={"Range": "bytes=4-7"})
-    assert response.status_code == 206
-    assert response.content == b"4567"
-    assert response.headers["content-range"] == "bytes 4-7/16"
-    assert response.headers["content-length"] == "4"
+    response = client.get("/api/tracks/drive-track/audio")
+    assert response.status_code == 200
+    assert response.content == payload
+    assert len(list((tmp_path / "media-cache").glob("*"))) == 1
     assert response.headers["content-type"].startswith("audio/mp4")
 
 
