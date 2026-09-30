@@ -115,11 +115,20 @@ function App() {
     setActiveBook(book); setActiveTrack(track); setStartAt(start)
     void loadFeatures()
   }
+  const trackQueue = useMemo(() => {
+    if (!activeBook || !activeTrack) return []
+    const album = activeBook.album?.trim()
+    const queue = album
+      ? books.flatMap(book => book.album?.trim() === album && book.artist === activeBook.artist ? book.tracks.map(track => ({ book, track })) : [])
+      : activeBook.tracks.map(track => ({ book: activeBook, track }))
+    return queue.some(item => item.track.id === activeTrack.id) ? queue : activeBook.tracks.map(track => ({ book: activeBook, track }))
+  }, [activeBook, activeTrack, books])
+  const queueIndex = trackQueue.findIndex(item => item.track.id === activeTrack?.id)
   const moveTrack = (delta: number) => {
-    if (!activeBook || !activeTrack) return
-    const index = activeBook.tracks.findIndex(track => track.id === activeTrack.id)
-    const next = activeBook.tracks[index + delta]
-    if (next) play(activeBook, next)
+    const index = queueIndex
+    if (index < 0 || !trackQueue.length) return
+    const next = trackQueue[index + delta]
+    if (next) play(next.book, next.track)
   }
   const updateBookFeature = async (bookId: string, kind: 'favorite' | 'rating' | 'tags', value: boolean | number | string[]) => {
     const result = await api<Record<string, unknown>>(`/api/books/${encodeURIComponent(bookId)}/${kind}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ [kind]: value }) })
@@ -203,7 +212,7 @@ function App() {
     </Routes></main>
     <BottomNavigation />
     {resumeBook && !activeTrack && <button className="resume-player" onClick={() => { const track = resumeBook.tracks.find(item => item.id === resumeBook.progress?.track_id); if (track) { play(resumeBook, track, resumeBook.progress?.position ?? 0); setResumeBook(null) } }}>Resume listening · {resumeBook.title}</button>}
-    <PlayerBar book={activeBook} track={activeTrack} start={startAt} onNext={() => moveTrack(1)} onPrevious={() => moveTrack(-1)} onTime={saveProgress} onCheckpoint={time => saveProgress(time, true)} />
+    <PlayerBar book={activeBook} track={activeTrack} start={startAt} canNext={queueIndex >= 0 && queueIndex < trackQueue.length - 1} canPrevious={queueIndex > 0} onNext={() => moveTrack(1)} onPrevious={() => moveTrack(-1)} onTime={saveProgress} onCheckpoint={time => saveProgress(time, true)} />
   </div>
 }
 

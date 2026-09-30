@@ -1,17 +1,18 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
-import { LoaderCircle, Moon, Pause, Play, SkipBack, SkipForward, Volume2 } from 'lucide-react'
+import { LoaderCircle, Moon, Pause, Play, RotateCcw, RotateCw, SkipBack, SkipForward, Volume2 } from 'lucide-react'
 import type { Book, Track } from '../types'
 import { Cover, IconButton } from './ui'
 
-type Props = { book: Book | null; track: Track | null; start: number; onNext: () => void; onPrevious: () => void; onTime: (time: number) => void; onCheckpoint: (time: number) => void }
+type Props = { book: Book | null; track: Track | null; start: number; canNext: boolean; canPrevious: boolean; onNext: () => void; onPrevious: () => void; onTime: (time: number) => void; onCheckpoint: (time: number) => void }
 
-export function PlayerBar({ book, track, start, onNext, onPrevious, onTime, onCheckpoint }: Props) {
+export function PlayerBar({ book, track, start, canNext, canPrevious, onNext, onPrevious, onTime, onCheckpoint }: Props) {
   const audio = useRef<HTMLAudioElement>(null)
   const [playing, setPlaying] = useState(false)
   const [playError, setPlayError] = useState(false)
   const [buffering, setBuffering] = useState(false)
   const [time, setTime] = useState(0)
   const [duration, setDuration] = useState(0)
+  const [playbackRate, setPlaybackRate] = useState('1')
   const [sleepMinutes, setSleepMinutes] = useState('off')
   const [sleepEndsAt, setSleepEndsAt] = useState(0)
   const [sleepRemaining, setSleepRemaining] = useState(0)
@@ -43,6 +44,7 @@ export function PlayerBar({ book, track, start, onNext, onPrevious, onTime, onCh
     const state = metricsRef.current
     Object.assign(state, { requestedAt: performance.now(), startedAt: 0, stalls: 0, rangeMs: 0, rangeBytes: 0, ranges: 0, lastSent: 0 })
     setMetrics({ startupMs: 0, stalls: 0, bufferedAhead: 0, rangeMs: 0, rangeBytes: 0, ranges: 0 })
+    player.playbackRate = Number(playbackRate)
     player.src = `/api/tracks/${encodeURIComponent(track.id)}/audio`
     setBuffering(true)
     player.load()
@@ -101,11 +103,14 @@ export function PlayerBar({ book, track, start, onNext, onPrevious, onTime, onCh
     <div className="player-track">{book?.cover && <Cover src={book.cover} alt="" />}
       <div className="player-label"><strong>{track?.title ?? 'Choose a book'}</strong><span>{buffering ? 'Buffering audio…' : book?.title ?? 'Audiobooks'}</span></div>
     </div>
+    <label className="playback-speed-control"><span>Speed</span><select aria-label="Playback speed" value={playbackRate} onChange={event => { setPlaybackRate(event.target.value); if (audio.current) audio.current.playbackRate = Number(event.target.value) }}><option value="0.75">0.75×</option><option value="1">1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="1.75">1.75×</option><option value="2">2×</option></select></label>
     <label className="sleep-timer"><Moon size={16} /><select aria-label="Sleep timer" value={sleepMinutes} onChange={event => setSleepMinutes(event.target.value)}><option value="off">Timer off</option><option value="15">15 min</option><option value="30">30 min</option><option value="45">45 min</option><option value="60">60 min</option><option value="end">End of track</option></select>{sleepEndsAt > 0 && <output aria-live="polite">{sleepRemaining}m</output>}</label>
     <div className="player-controls">
-      <IconButton aria-label="Previous track" onClick={onPrevious}><SkipBack size={18} /></IconButton>
+      <IconButton className="track-skip" aria-label="Previous track" disabled={!canPrevious} onClick={onPrevious}><SkipBack size={18} /></IconButton>
+      <IconButton className="seek-skip" aria-label="Back 15 seconds" disabled={!track} onClick={() => { if (audio.current) audio.current.currentTime = Math.max(0, audio.current.currentTime - 15) }}><RotateCcw size={17} /><span>15</span></IconButton>
       <IconButton aria-label={buffering ? 'Buffering audio' : playing ? 'Pause' : 'Play'} className="play-toggle" disabled={!track || buffering} onClick={() => { const p = audio.current; if (p?.paused) void p.play(); else p?.pause() }}>{buffering ? <LoaderCircle className="spin" size={18} /> : playing ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}</IconButton>
-      <IconButton aria-label="Next track" onClick={onNext}><SkipForward size={18} /></IconButton>
+      <IconButton className="seek-skip" aria-label="Forward 15 seconds" disabled={!track} onClick={() => { if (audio.current) audio.current.currentTime = Math.min(duration, audio.current.currentTime + 15) }}><RotateCw size={17} /><span>15</span></IconButton>
+      <IconButton className="track-skip" aria-label="Next track" disabled={!canNext} onClick={onNext}><SkipForward size={18} /></IconButton>
     </div>
     <div className="player-timeline"><span>{formatTime(time)}</span><input aria-label="Playback position" aria-valuetext={`${formatTime(time)} of ${formatTime(duration)}`} type="range" min="0" max={duration || 100} value={Math.min(time, duration || 100)} style={{ '--played': `${duration ? Math.min(100, time / duration * 100) : 0}%` } as CSSProperties} onChange={event => { if (audio.current) audio.current.currentTime = Number(event.target.value) }} /><span>{formatTime(duration)}</span></div>
     <Volume2 className="volume-icon" size={18} />
