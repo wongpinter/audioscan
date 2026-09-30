@@ -198,6 +198,9 @@ class Database:
                 CREATE TABLE IF NOT EXISTS scan_items (
                     id TEXT PRIMARY KEY, data TEXT NOT NULL, error TEXT NOT NULL DEFAULT ''
                 );
+                CREATE TABLE IF NOT EXISTS scan_directories (
+                    id TEXT PRIMARY KEY, path TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS favorites (
                     book_id TEXT PRIMARY KEY
                 );
@@ -370,6 +373,29 @@ class Database:
     def clear_scan_items(self) -> None:
         with self.connect() as db:
             db.execute("DELETE FROM scan_items")
+
+    def scan_directories(self) -> list[tuple[str, str]]:
+        with self.connect() as db:
+            rows = db.execute("SELECT id,path FROM scan_directories ORDER BY rowid").fetchall()
+        return [(str(row["id"]), str(row["path"])) for row in rows]
+
+    def queue_scan_directories(self, directories: list[tuple[str, str]]) -> None:
+        with self.connect() as db:
+            db.executemany(
+                "INSERT OR IGNORE INTO scan_directories(id,path) VALUES(?,?)",
+                directories,
+            )
+
+    def enqueue_scan_directory(self, folder_id: str, path: str) -> None:
+        self.queue_scan_directories([(folder_id, path)])
+
+    def clear_scan_directories(self) -> None:
+        with self.connect() as db:
+            db.execute("DELETE FROM scan_directories")
+
+    def finish_scan_directory(self, folder_id: str) -> None:
+        with self.connect() as db:
+            db.execute("DELETE FROM scan_directories WHERE id=?", (folder_id,))
 
     def save_progress(self, book_id: str, track_id: str, position: float) -> None:
         with self.connect() as db:
@@ -616,6 +642,7 @@ class LibraryScanner:
             items = self.db.pending_scan_items() if resume else []
             if not resume:
                 self.db.clear_scan_items()
+                self.db.clear_scan_directories()
                 items = []
             failed_ids = {item["id"] for item in items if item.get("error")}
             if retry_failed:
@@ -639,16 +666,15 @@ class LibraryScanner:
                     with self.db.connect() as connection:
                         connection.execute("DELETE FROM scan_items WHERE id=?", (item["id"],))
             seen = {item["id"] for item in items}
-            stack = [(self.config.folder_id, "")]
-            visited: set[str] = set()
-            while stack:
-                folder_id, prefix = stack.pop()
-                if folder_id in visited:
-                    continue
-                visited.add(folder_id)
+            directories = self.db.scan_directories() if resume else []
+            if not directories:
+                self.db.enqueue_scan_directory(self.config.folder_id, "")
+            while directories := self.db.scan_directories():
+                folder_id, prefix = directories[0]
                 if folder_id in excluded or any(
                     prefix.startswith(path) for path in excluded_prefixes
                 ):
+                    self.db.finish_scan_directory(folder_id)
                     logger.info("Drive scan skipping excluded directory path=%s", prefix)
                     continue
                 self.publish(
@@ -660,15 +686,12 @@ class LibraryScanner:
                 )
                 folders = list(source.iter_child_directories(folder_id, prefix))
                 logger.info("Drive scan folder listing complete folders=%d", len(folders))
-                stack.extend(
-                    reversed(
-                        [
-                            folder
-                            for folder in folders
-                            if folder[0] not in excluded
-                            and not any(folder[1].startswith(path) for path in excluded_prefixes)
-                        ]
-                    )
+                self.db.queue_scan_directories(
+                    [
+                        folder for folder in folders
+                        if folder[0] not in excluded
+                        and not any(folder[1].startswith(path) for path in excluded_prefixes)
+                    ]
                 )
                 self.publish(
                     status="running",
@@ -681,9 +704,9 @@ class LibraryScanner:
                 logger.info(
                     "Drive scan file listing complete files=%d path=%s", len(files), prefix or "/"
                 )
-                total += len(files)
-                self.publish(total=total, processed=processed, current=prefix or "/")
                 pending = [remote for remote in files if remote.id not in seen]
+                total += len(pending)
+                self.publish(total=total, processed=processed, current=prefix or "/")
                 with ThreadPoolExecutor(max_workers=5, thread_name_prefix="drive-probe") as pool:
                     futures = {
                         pool.submit(self._probe_remote, source, remote): remote
@@ -712,6 +735,7 @@ class LibraryScanner:
                             self._commit(items)
                         if error:
                             failed_ids.add(remote.id)
+                self.db.finish_scan_directory(folder_id)
             if retry_failed and failures:
                 with self.db.connect() as connection:
                     connection.execute("DELETE FROM scan_items WHERE error != ''")

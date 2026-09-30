@@ -416,6 +416,44 @@ def test_scan_status_partial_update_keeps_required_status(tmp_path: Path) -> Non
     assert status["current"] == "Book/"
 
 
+def test_scan_resume_uses_persisted_directory_queue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import audioscan.web as web
+    from audioscan.web import LibraryScanner
+
+    cfg = config(tmp_path)
+    db = seeded_db(cfg.db_path)
+    db.enqueue_scan_directory("child", "Child")
+    calls: list[tuple[str, str]] = []
+
+    class Source:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def iter_child_directories(self, folder_id: str, prefix: str) -> list[tuple[str, str]]:
+            calls.append(("folders", prefix))
+            return [("grandchild", f"{prefix.rstrip('/')}/Grandchild/")] if folder_id == "child" else []
+
+        def iter_directory_files(self, folder_id: str, prefix: str) -> list[Any]:
+            calls.append(("files", prefix))
+            return []
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(web, "DriveSource", Source)
+    scanner = LibraryScanner(cfg, db)
+    monkeypatch.setattr(scanner, "_commit", lambda items: None)
+    scanner._run(retry_failed=False, resume=True)
+
+    assert calls == [
+        ("folders", "Child"),
+        ("files", "Child"),
+        ("folders", "Child/Grandchild/"),
+        ("files", "Child/Grandchild/"),
+    ]
+    assert db.scan_directories() == []
+
+
 def test_cover_route_returns_embedded_image(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
