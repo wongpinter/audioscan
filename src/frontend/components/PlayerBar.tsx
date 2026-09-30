@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
-import { LoaderCircle, Moon, Pause, Play, RotateCcw, RotateCw, SkipBack, SkipForward, Volume2 } from 'lucide-react'
+import { ChevronDown, ChevronUp, LoaderCircle, Moon, Pause, Play, RotateCcw, RotateCw, SkipBack, SkipForward, Volume2 } from 'lucide-react'
 import type { Book, Track } from '../types'
 import { Cover, IconButton } from './ui'
 
@@ -8,6 +8,7 @@ type Props = { book: Book | null; track: Track | null; start: number; autoPlay: 
 export function PlayerBar({ book, track, start, autoPlay, onResume, canNext, canPrevious, onNext, onPrevious, onTime, onCheckpoint }: Props) {
   const audio = useRef<HTMLAudioElement>(null)
   const [playing, setPlaying] = useState(false)
+  const [minimized, setMinimized] = useState(false)
   const [playError, setPlayError] = useState(false)
   const [buffering, setBuffering] = useState(false)
   const [time, setTime] = useState(0)
@@ -19,6 +20,11 @@ export function PlayerBar({ book, track, start, autoPlay, onResume, canNext, can
   const sleepTimer = useRef<number | null>(null)
   const sleepAtEnd = useRef(false)
   useEffect(() => () => { if (sleepTimer.current) window.clearTimeout(sleepTimer.current) }, [])
+  useEffect(() => {
+    if (!playing || minimized) return
+    const timer = window.setTimeout(() => setMinimized(true), 30_000)
+    return () => window.clearTimeout(timer)
+  }, [playing, minimized])
   useEffect(() => {
     if (sleepTimer.current) window.clearTimeout(sleepTimer.current)
     sleepTimer.current = null
@@ -98,10 +104,11 @@ export function PlayerBar({ book, track, start, autoPlay, onResume, canNext, can
       player.removeEventListener('error', loadFailed)
     }
   }, [track?.id, start, autoPlay])
-  return <footer className="player-bar">
+  return <footer className={`player-bar${minimized ? ' player-bar-minimized' : ''}`}>
     <audio ref={audio} preload="metadata" onTimeUpdate={event => { const player = event.currentTarget; const value = player.currentTime; setTime(value); onTime(value); const ahead = player.buffered.length ? Math.max(0, player.buffered.end(player.buffered.length - 1) - value) : 0; setMetrics(current => ({ ...current, bufferedAhead: Math.round(ahead) })) }} onDurationChange={event => setDuration(event.currentTarget.duration || 0)} onEnded={event => { onCheckpoint(event.currentTarget.currentTime); if (sleepAtEnd.current) { sleepAtEnd.current = false; setSleepMinutes('off'); setSleepEndsAt(0) } else onNext() }} onPause={event => { onCheckpoint(event.currentTarget.currentTime); setPlaying(false) }} onPlay={() => setPlaying(true)} />
     {playError && <button className="play-retry" onClick={() => { const player = audio.current; if (!player) return; const position = player.currentTime || start; player.src = `/api/tracks/${encodeURIComponent(track?.id ?? '')}/audio`; player.load(); player.addEventListener('loadedmetadata', () => { player.currentTime = position; void player.play().then(() => setPlayError(false)).catch(() => setPlayError(true)) }, { once: true }) }}>Retry audio</button>}
     {import.meta.env.DEV && <output className="playback-metrics">Start {metrics.startupMs} ms · stalls {metrics.stalls} · buffer {metrics.bufferedAhead}s · Drive {metrics.rangeMs} ms / {metrics.ranges} ranges / {metrics.rangeBytes} B</output>}
+    {minimized ? <button className="player-mini-toggle" aria-label="Expand player" onClick={() => setMinimized(false)}><ChevronUp size={17} /></button> : <button className="player-collapse-toggle" aria-label="Minimize player" onClick={() => setMinimized(true)}><ChevronDown size={17} /></button>}
     <div className="player-track">{book?.cover && <Cover src={book.cover} alt={`${book.title} cover`} />}
       <div className="player-label"><strong>{book?.title ?? 'Choose a book'}</strong><span>{buffering ? 'Buffering audio…' : track?.title ?? track?.name ?? 'Audiobooks'}</span></div>
     </div>
@@ -114,7 +121,7 @@ export function PlayerBar({ book, track, start, autoPlay, onResume, canNext, can
       <IconButton className="seek-skip" aria-label="Forward 15 seconds" disabled={!track} onClick={() => { if (audio.current) audio.current.currentTime = Math.min(duration, audio.current.currentTime + 15) }}><RotateCw size={17} /><span>15</span></IconButton>
       <IconButton className="track-skip" aria-label="Next track" disabled={!canNext} onClick={onNext}><SkipForward size={18} /></IconButton>
     </div>
-    <div className="player-timeline"><span>{formatTime(time)}</span><input aria-label="Playback position" aria-valuetext={`${formatTime(time)} of ${formatTime(duration)}`} type="range" min="0" max={duration || 100} value={Math.min(time, duration || 100)} style={{ '--played': `${duration ? Math.min(100, time / duration * 100) : 0}%` } as CSSProperties} onChange={event => { if (audio.current) audio.current.currentTime = Number(event.target.value) }} /><span>{formatTime(duration)}</span></div>
+    <div className="player-timeline" onClick={() => { if (minimized) setMinimized(false) }}><span>{formatTime(time)}</span><input onFocus={() => { if (minimized) setMinimized(false) }} aria-label="Playback position" aria-valuetext={`${formatTime(time)} of ${formatTime(duration)}`} type="range" min="0" max={duration || 100} value={Math.min(time, duration || 100)} style={{ '--played': `${duration ? Math.min(100, time / duration * 100) : 0}%` } as CSSProperties} onChange={event => { if (audio.current) audio.current.currentTime = Number(event.target.value) }} /><span>{formatTime(duration)}</span></div>
     <Volume2 className="volume-icon" size={18} />
   </footer>
 }
