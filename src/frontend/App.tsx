@@ -227,7 +227,18 @@ function BottomNavigation() {
 }
 
 function HomePage({ books, features, scan, error, onOpen, onPlay, onLibrary, onRefresh }: { books: Book[]; features: Features; scan: ScanStatus | null; error: string; onOpen: (book: Book) => void; onPlay: (book: Book) => void; onLibrary: () => void; onRefresh: () => void }) {
-  const listening = books.filter(book => (book.progress?.position ?? 0) > 0).slice(0, 5)
+  const booksById = new Map(books.map(book => [book.id, book]))
+  const seenAlbums = new Set<string>()
+  const listening = [...features.history.map(item => booksById.get(item.book_id)).filter((book): book is Book => !!book), ...books.filter(book => (book.progress?.position ?? 0) > 0)]
+    .filter(book => {
+      const albumKey = book.album?.trim()
+        ? `${book.artist?.trim().toLocaleLowerCase() ?? ''}:${book.album.trim().toLocaleLowerCase()}`
+        : book.id
+      if (seenAlbums.has(albumKey)) return false
+      seenAlbums.add(albumKey)
+      return true
+    })
+    .slice(0, 5)
   return <section className="home-page">
     <div className="home-greeting"><div><span className="eyebrow">YOUR PERSONAL LIBRARY</span><h1>Good stories,<br />good company.</h1><p>Your next chapter is waiting.</p></div><Avatar className="home-avatar">A</Avatar></div>
     {scan && <ScanProgress scan={scan} onRefresh={onRefresh} />}
