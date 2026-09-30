@@ -446,6 +446,22 @@ class DriveSource:
         for folder in self._list_pages(self._folder_query(folder_id)):
             yield str(folder["id"]), f"{prefix}{folder.get('name', '')}/"
 
+    def iter_directories_with_ids(self) -> Iterator[dict[str, str]]:
+        """Yield every descendant folder with its Drive ID and library-relative path."""
+        if not self._folder_id:
+            raise DriveError("A Drive folder ID is required for directory iteration")
+        stack = [(self._folder_id, "")]
+        visited = {self._folder_id}
+        while stack:
+            folder_id, prefix = stack.pop()
+            for child_id, path in self.iter_child_directories(folder_id, prefix):
+                if child_id in visited:
+                    continue
+                visited.add(child_id)
+                name = path.rstrip("/").rsplit("/", 1)[-1]
+                yield {"id": child_id, "name": name, "path": path.rstrip("/")}
+                stack.append((child_id, path))
+
     def iter_directories(self) -> Iterator[tuple[str, str]]:
         """Yield Drive folder IDs and relative paths in depth-first order."""
         if not self._folder_id:

@@ -17,6 +17,19 @@ export function Card({ className = '', ...props }: HTMLAttributes<HTMLElement>) 
   return <article className={`card ${className}`} {...props} />
 }
 
+export function Badge({ className = '', children }: HTMLAttributes<HTMLSpanElement>) {
+  return <span className={`badge ${className}`}>{children}</span>
+}
+
+export function Progress({ className = '', value, label }: { className?: string; value: number; label?: string }) {
+  const progress = Math.max(0, Math.min(100, value))
+  return <div className={`progress ${className}`} role="progressbar" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
+}
+
+export function Avatar({ className = '', children }: HTMLAttributes<HTMLSpanElement>) {
+  return <span className={`avatar ${className}`} aria-hidden="true">{children}</span>
+}
+
 export function Skeleton({ className = '' }: { className?: string }) {
   return <span className={`skeleton ${className}`} aria-hidden="true" />
 }

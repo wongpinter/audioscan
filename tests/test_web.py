@@ -97,6 +97,62 @@ def sign_in(client: TestClient) -> None:
     client.cookies.set("session", cookie)
 
 
+def test_excluded_directory_settings_use_scanned_paths_without_drive_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import audioscan.web as web
+
+    cfg = config(tmp_path)
+    db = seeded_db(cfg.db_path)
+
+    class NoDriveListing:
+        def __init__(self, **kwargs: Any) -> None:
+            raise AssertionError("Settings must not call Drive")
+
+    monkeypatch.setattr(web, "DriveSource", NoDriveListing)
+    client = TestClient(create_app(cfg, db))
+    sign_in(client)
+    assert client.get("/api/directories").json() == []
+    assert client.get("/api/settings/excluded-directories").json() == {"excluded_directories": []}
+    book = db.book("book-key")
+    assert book is not None
+    book["tracks"][0]["path"] = "Movies/Series/Book.m4b"
+    db.save_library([book], [book["tracks"][0]])
+    assert client.get("/api/directories").json() == [
+        {"id": "Movies", "name": "Movies", "path": "Movies"},
+        {"id": "Movies/Series", "name": "Series", "path": "Movies/Series"},
+    ]
+    assert (
+        client.put("/api/settings/excluded-directories", json={"paths": ["Movies"]}).status_code
+        == 200
+    )
+    assert db.library() == []
+
+
+def test_excluded_directory_removes_matching_media_and_book_features(tmp_path: Path) -> None:
+    db = seeded_db(tmp_path / "library.sqlite3")
+    book = db.book("book-key")
+    assert book is not None
+    book["tracks"][0]["path"] = "Movies/Book.m4b"
+    db.save_library([book], [book["tracks"][0]])
+    db.save_progress("book-key", "drive-track", 20)
+    with db.connect() as connection:
+        connection.execute("INSERT INTO favorites(book_id) VALUES(?)", ("book-key",))
+        connection.execute("INSERT INTO ratings(book_id,rating) VALUES(?,?)", ("book-key", 5))
+        connection.execute("INSERT INTO book_tags(book_id,tag) VALUES(?,?)", ("book-key", "Sci-fi"))
+        connection.execute("INSERT INTO playlists(id,name) VALUES(?,?)", ("playlist", "Books"))
+        connection.execute(
+            "INSERT INTO playlist_books(playlist_id,book_id,position) VALUES(?,?,?)",
+            ("playlist", "book-key", 0),
+        )
+    db.replace_excluded_directories([{"id": "movies-id", "name": "Movies", "path": "Movies"}])
+    assert db.library() == []
+    with db.connect() as connection:
+        for table in ("tracks", "progress", "favorites", "ratings", "book_tags", "playlist_books"):
+            assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+    assert db.excluded_directories() == [{"id": "Movies", "name": "Movies", "path": "Movies"}]
+
+
 def test_library_features_favorites_ratings_tags_playlists_history_storage(tmp_path: Path) -> None:
     cfg = config(tmp_path)
     db = seeded_db(cfg.db_path)
@@ -222,6 +278,29 @@ def test_audio_endpoint_proxies_only_requested_range(
     assert response.headers["content-range"] == "bytes 4-7/16"
     assert response.headers["content-length"] == "4"
     assert response.headers["content-type"].startswith("audio/mp4")
+
+
+def test_playback_metrics_require_auth_and_validate_values(tmp_path: Path) -> None:
+    db = seeded_db(tmp_path / "library.sqlite3")
+    client = TestClient(create_app(config(tmp_path), db))
+    metrics = {
+        "startupMs": 500,
+        "stalls": 1,
+        "bufferedAhead": 20,
+        "rangeMs": 700,
+        "rangeBytes": 65536,
+        "ranges": 2,
+    }
+    assert client.post("/api/tracks/drive-track/playback-metrics", json=metrics).status_code == 401
+    sign_in(client)
+    assert client.post("/api/tracks/drive-track/playback-metrics", json=metrics).status_code == 204
+    assert (
+        client.post(
+            "/api/tracks/drive-track/playback-metrics", json={**metrics, "stalls": -1}
+        ).status_code
+        == 422
+    )
+    assert client.post("/api/tracks/missing/playback-metrics", json=metrics).status_code == 404
 
 
 def test_scan_commit_restores_nested_metadata_types(tmp_path: Path) -> None:

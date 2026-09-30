@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
-import { Link, Route, Routes, useNavigate, useParams } from 'react-router-dom'
+import { Link, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { ArrowLeft, BookOpen, CheckCircle2, Clock3, Headphones, Library, LoaderCircle, Search, Settings2, SlidersHorizontal, Heart, Star, Plus } from 'lucide-react'
-import { Button, Card, Cover, Input, PlayIcon, Skeleton } from './components/ui'
+import { Avatar, Button, Card, Cover, Input, PlayIcon, Progress, Skeleton } from './components/ui'
 import { PlayerBar } from './components/PlayerBar'
 import type { Book, Chapter, Track } from './types'
 
@@ -20,6 +20,7 @@ function App() {
   const [filter, setFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | 'in-progress' | 'not-started' | 'completed'>('all')
   const [sortBy, setSortBy] = useState<'title' | 'author' | 'duration' | 'rating'>('title')
+  const [groupMode, setGroupMode] = useState<'artist' | 'directory' | 'album'>('artist')
   const [favoritesOnly, setFavoritesOnly] = useState(false)
   const [playlistView, setPlaylistView] = useState<string | null>(null)
   const [error, setError] = useState('')
@@ -124,29 +125,67 @@ function App() {
     })
   }, [activeBook, activeTrack])
 
+  const openBook = (book: Book) => navigate(`/book/${encodeURIComponent(book.id)}`)
+  const playBook = (book: Book) => { const track = book.tracks[0]; if (track) play(book, track, book.progress?.track_id === track.id ? book.progress.position : 0) }
+  const groupLink = (mode: 'artist' | 'directory' | 'album', name: string) => navigate(`/group/${mode}?name=${encodeURIComponent(name)}`)
   return <div className="app-shell">
-    <aside className="sidebar">
-      <Link className="brand" to="/"><span className="brand-mark"><Headphones size={20} /></span><span>audio<span className="brand-accent">scan</span></span></Link>
-      <div className="nav-label">LIBRARY</div><Link className="nav-item selected" to="/"><Library size={18} />Your library</Link>
-      <div className="sidebar-footer"><span className="avatar">A</span><span><strong>Personal library</strong><small>Google Drive</small></span><Settings2 size={17} /></div>
-    </aside>
-    <main className="main-content">
-      <header className="topbar"><div className="breadcrumbs"><span>Library</span><span className="crumb-separator">/</span><span className="crumb-current">Audiobooks</span></div><Button className="top-action" disabled={scan?.status === 'running'} onClick={() => void refreshLibrary()}>{scan?.status === 'running' ? 'Scanning…' : 'Scan library'}</Button></header>
-      <Routes>
-        <Route path="/" element={<LibraryPage books={filtered} allBooks={books} features={features} storage={storage} featureError={featureError} onFeature={updateBookFeature} favoritesOnly={favoritesOnly} setFavoritesOnly={setFavoritesOnly} onCreatePlaylist={makePlaylist} onAddToPlaylist={addToPlaylist} onPlaylistView={setPlaylistView} playlistView={playlistView} reloadFeatures={loadFeatures} query={filter} setQuery={setFilter} statusFilter={statusFilter} setStatusFilter={setStatusFilter} sortBy={sortBy} setSortBy={setSortBy} error={error} loading={loading} scan={scan} onRefresh={() => void refreshLibrary()} onOpen={book => navigate(`/book/${encodeURIComponent(book.id)}`)} onPlay={book => { const track = book.tracks[0]; if (track) play(book, track, book.progress?.track_id === track.id ? book.progress.position : 0) }} />} />
-        <Route path="/book/:bookId" element={<BookPage onPlay={play} />} />
-        <Route path="*" element={<div className="empty-state">Page not found.</div>} />
-      </Routes>
-    </main>
+    <header className="app-header">
+      <Link className="brand" to="/"><span className="brand-mark"><Headphones size={19} /></span><span>audio<span className="brand-accent">scan</span></span></Link>
+      <nav className="desktop-nav" aria-label="Main navigation"><Link to="/">Home</Link><Link to="/search">Search</Link><Link to="/library">Library</Link></nav>
+      <div className="header-actions"><Button className="scan-action" disabled={scan?.status === 'running'} onClick={() => void refreshLibrary()}>{scan?.status === 'running' ? 'Scanning…' : 'Scan Drive'}</Button><Link className="settings-link" to="/settings" aria-label="Settings"><Settings2 size={19} /></Link></div>
+    </header>
+    <main className="main-content"><Routes>
+      <Route path="/" element={<HomePage books={filtered} features={features} scan={scan} error={error} onOpen={openBook} onPlay={playBook} onLibrary={() => navigate('/library')} onRefresh={() => void refreshLibrary()} />} />
+      <Route path="/search" element={<SearchPage books={filtered} query={filter} setQuery={setFilter} onOpen={openBook} />} />
+      <Route path="/library" element={<LibraryPage groupMode={groupMode} setGroupMode={setGroupMode} onOpenGroup={groupLink} books={filtered} allBooks={books} features={features} storage={storage} featureError={featureError} onFeature={updateBookFeature} favoritesOnly={favoritesOnly} setFavoritesOnly={setFavoritesOnly} onCreatePlaylist={makePlaylist} onAddToPlaylist={addToPlaylist} onPlaylistView={setPlaylistView} playlistView={playlistView} reloadFeatures={loadFeatures} query={filter} setQuery={setFilter} statusFilter={statusFilter} setStatusFilter={setStatusFilter} sortBy={sortBy} setSortBy={setSortBy} error={error} loading={loading} scan={scan} onRefresh={() => void refreshLibrary()} onOpen={openBook} onPlay={playBook} />} />
+      <Route path="/group/:mode" element={<GroupPage books={filtered} onOpen={openBook} onOpenGroup={groupLink} />} />
+      <Route path="/book/:bookId" element={<BookPage onPlay={play} />} />
+      <Route path="/settings" element={<SettingsPage reloadLibrary={load} />} />
+      <Route path="*" element={<div className="empty-state">Page not found.</div>} />
+    </Routes></main>
+    <BottomNavigation />
     <PlayerBar book={activeBook} track={activeTrack} start={startAt} onNext={() => moveTrack(1)} onPrevious={() => moveTrack(-1)} onTime={saveProgress} />
   </div>
 }
 
-function LibraryPage({ books, allBooks, features, storage, featureError, onFeature, favoritesOnly, setFavoritesOnly, playlistView, onPlaylistView, reloadFeatures, onCreatePlaylist, onAddToPlaylist, query, setQuery, statusFilter, setStatusFilter, sortBy, setSortBy, error, loading, scan, onRefresh, onOpen, onPlay }: { books: Book[]; allBooks: Book[]; features: Features; storage: StorageInfo | null; featureError: string; onFeature: (bookId: string, kind: 'favorite' | 'rating' | 'tags', value: boolean | number | string[]) => void; favoritesOnly: boolean; setFavoritesOnly: (value: boolean) => void; playlistView: string | null; onPlaylistView: (value: string | null) => void; reloadFeatures: () => void; onCreatePlaylist: () => void; onAddToPlaylist: (playlistId: string, bookId: string) => void; query: string; setQuery: (value: string) => void; statusFilter: 'all' | 'in-progress' | 'not-started' | 'completed'; setStatusFilter: (value: 'all' | 'in-progress' | 'not-started' | 'completed') => void; sortBy: 'title' | 'author' | 'duration' | 'rating'; setSortBy: (value: 'title' | 'author' | 'duration' | 'rating') => void; error: string; loading: boolean; scan: ScanStatus | null; onRefresh: () => void; onOpen: (book: Book) => void; onPlay: (book: Book) => void }) {
+function BottomNavigation() {
+  const { pathname } = useLocation()
+  return <nav className="bottom-navigation" aria-label="Main navigation">
+    <Link to="/" aria-current={pathname === '/' ? 'page' : undefined}><Headphones size={19} /><span>Home</span></Link>
+    <Link to="/search" aria-current={pathname === '/search' ? 'page' : undefined}><Search size={19} /><span>Search</span></Link>
+    <Link to="/library" aria-current={pathname.startsWith('/library') || pathname.startsWith('/group') ? 'page' : undefined}><Library size={19} /><span>Library</span></Link>
+    <Link to="/settings" aria-current={pathname === '/settings' ? 'page' : undefined}><Settings2 size={19} /><span>You</span></Link>
+  </nav>
+}
+
+function HomePage({ books, features, scan, error, onOpen, onPlay, onLibrary, onRefresh }: { books: Book[]; features: Features; scan: ScanStatus | null; error: string; onOpen: (book: Book) => void; onPlay: (book: Book) => void; onLibrary: () => void; onRefresh: () => void }) {
+  const listening = books.filter(book => (book.progress?.position ?? 0) > 0).slice(0, 5)
+  return <section className="home-page">
+    <div className="home-greeting"><div><span className="eyebrow">YOUR PERSONAL LIBRARY</span><h1>Good stories,<br />good company.</h1><p>Your next chapter is waiting.</p></div><Avatar className="home-avatar">A</Avatar></div>
+    {scan && <ScanProgress scan={scan} onRefresh={onRefresh} />}
+    {error && <div className="empty-state">{error} <a href="/auth/google">Sign in</a></div>}
+    <SectionHeader title="Continue listening" action="View library" onAction={onLibrary} />
+    {listening.length ? <div className="home-book-shelf">{listening.map(book => <button className="home-book-tile" key={book.id} onClick={() => onPlay(book)}><Cover className="home-book-cover" src={book.cover || '/icon.svg'} alt={`${book.title} cover`} /><span className="home-book-copy"><strong>{book.title}</strong><small>{book.artist || 'Audiobook'}</small><Progress value={book.tracks.find(track => track.id === book.progress?.track_id)?.duration ? (book.progress!.position / book.tracks.find(track => track.id === book.progress?.track_id)!.duration) * 100 : 0} label={`${book.title} listening progress`} /></span></button>)}</div> : <div className="home-empty"><Headphones size={24} /><p>Your listening shelf will appear here.</p><Button onClick={onLibrary}>Browse library</Button></div>}
+    <SectionHeader title="Your library" subtitle={`${books.length} audiobooks`} action="Browse all" onAction={onLibrary} />
+    {books.length ? <div className="home-book-grid">{books.slice(0, 8).map(book => <button className="home-library-tile" key={book.id} onClick={() => onOpen(book)}><Cover className="home-library-cover" src={book.cover || '/icon.svg'} alt={`${book.title} cover`} /><strong>{book.title}</strong><small>{book.artist || 'Audiobook'}</small></button>)}</div> : <div className="home-empty"><p>Your Drive library is ready when you are.</p><Button onClick={onLibrary}>Open library</Button></div>}
+    {features.playlists.length > 0 && <><SectionHeader title="Playlists" action="Manage" onAction={onLibrary} /><div className="home-playlists">{features.playlists.slice(0, 4).map((playlist, index) => <button key={playlist.id} onClick={onLibrary}><span className={`playlist-art playlist-art-${index % 4}`}><Headphones size={22} /></span><span><strong>{playlist.name}</strong><small>{playlist.book_ids.length} audiobooks</small></span></button>)}</div></>}
+  </section>
+}
+
+function SearchPage({ books, query, setQuery, onOpen }: { books: Book[]; query: string; setQuery: (value: string) => void; onOpen: (book: Book) => void }) {
+  return <section className="search-page"><span className="eyebrow">FIND YOUR NEXT LISTEN</span><h1>Search</h1><label className="search-box"><Search size={19} /><Input autoFocus placeholder="Search audiobooks, authors, tags…" value={query} onChange={event => setQuery(event.target.value)} /><button type="button" aria-label="Clear search" onClick={() => setQuery('')} disabled={!query}>×</button></label><p className="search-results-count">{query ? `${books.length} matching audiobooks` : 'Search your collection by title, author, or tag.'}</p>{query && <div className="media-grid">{books.map((book, index) => <MediaCard key={book.id} book={book} index={index} favorite={false} rating={0} tags={[]} playlists={[]} onFavorite={() => {}} onRate={() => {}} onTag={() => {}} onAddToPlaylist={() => {}} onOpen={() => onOpen(book)} onPlay={() => onOpen(book)} />)}</div>}{query && !books.length && <div className="empty-state">No audiobooks match “{query}”.</div>}</section>
+}
+
+function SectionHeader({ title, subtitle, action, onAction }: { title: string; subtitle?: string; action?: string; onAction?: () => void }) {
+  return <div className="section-heading"><div><h2>{title}</h2>{subtitle && <p>{subtitle}</p>}</div>{action && <button className="section-action" onClick={onAction}>{action}<ArrowLeft className="section-action-arrow" size={15} /></button>}</div>
+}
+
+function LibraryPage({ groupMode, setGroupMode, onOpenGroup, books, allBooks, features, storage, featureError, onFeature, favoritesOnly, setFavoritesOnly, playlistView, onPlaylistView, reloadFeatures, onCreatePlaylist, onAddToPlaylist, query, setQuery, statusFilter, setStatusFilter, sortBy, setSortBy, error, loading, scan, onRefresh, onOpen, onPlay }: { groupMode: 'artist' | 'directory' | 'album'; setGroupMode: (value: 'artist' | 'directory' | 'album') => void; onOpenGroup: (mode: 'artist' | 'directory' | 'album', name: string) => void; books: Book[]; allBooks: Book[]; features: Features; storage: StorageInfo | null; featureError: string; onFeature: (bookId: string, kind: 'favorite' | 'rating' | 'tags', value: boolean | number | string[]) => void; favoritesOnly: boolean; setFavoritesOnly: (value: boolean) => void; playlistView: string | null; onPlaylistView: (value: string | null) => void; reloadFeatures: () => void; onCreatePlaylist: () => void; onAddToPlaylist: (playlistId: string, bookId: string) => void; query: string; setQuery: (value: string) => void; statusFilter: 'all' | 'in-progress' | 'not-started' | 'completed'; setStatusFilter: (value: 'all' | 'in-progress' | 'not-started' | 'completed') => void; sortBy: 'title' | 'author' | 'duration' | 'rating'; setSortBy: (value: 'title' | 'author' | 'duration' | 'rating') => void; error: string; loading: boolean; scan: ScanStatus | null; onRefresh: () => void; onOpen: (book: Book) => void; onPlay: (book: Book) => void }) {
   return <section className="library-page">
     <div className="hero"><div><div className="eyebrow"><BookOpen size={14} /> YOUR COLLECTION</div><h1>Your library</h1><p>Stories for wherever the day takes you.</p></div><div className="hero-art"><Headphones size={88} strokeWidth={1.1} /></div></div>
-    <div className="section-heading"><div><h2>All audiobooks</h2><p>{books.length} {books.length === 1 ? 'title' : 'titles'} in your collection</p></div><label className="search-box"><Search size={17} /><Input placeholder="Search your library" value={query} onChange={event => setQuery(event.target.value)} /></label></div>
-    <div className="filter-toolbar"><div className="filter-options" role="group" aria-label="Filter audiobooks"><SlidersHorizontal size={15} className="filter-icon" />{(['all', 'in-progress', 'not-started', 'completed'] as const).map(value => <button key={value} className={`filter-chip ${statusFilter === value ? 'active' : ''}`} aria-pressed={statusFilter === value} onClick={() => setStatusFilter(value)}>{value === 'all' ? 'All books' : value === 'in-progress' ? 'In progress' : value === 'not-started' ? 'Not started' : 'Finished'}</button>)}<button className={`filter-chip ${favoritesOnly ? 'active' : ''}`} aria-pressed={favoritesOnly} onClick={() => setFavoritesOnly(!favoritesOnly)}>Favorites</button></div><label className="sort-control"><span>Sort</span><select value={sortBy} onChange={event => setSortBy(event.target.value as typeof sortBy)} aria-label="Sort audiobooks"><option value="title">Title</option><option value="author">Author</option><option value="duration">Longest</option><option value="rating">Top rated</option></select></label></div>
+    <div className="library-heading"><div className="library-heading-copy"><h2>All audiobooks</h2><span>{books.length.toLocaleString()} titles</span></div><label className="search-box"><Search size={17} /><Input placeholder="Search your library" value={query} onChange={event => setQuery(event.target.value)} /></label></div>
+    <div className="group-toolbar" role="group" aria-label="Browse audiobooks by"><span className="browse-label">Browse by</span>{(['artist', 'directory', 'album'] as const).map(mode => <button key={mode} className={groupMode === mode ? 'active' : ''} aria-pressed={groupMode === mode} onClick={() => setGroupMode(mode)}>{mode[0].toUpperCase() + mode.slice(1)}</button>)}</div>
+    <details className="filter-panel"><summary><SlidersHorizontal size={16} /><span>Filters and sort</span><span className="filter-summary-state">{statusFilter !== 'all' || favoritesOnly || sortBy !== 'title' ? 'Applied' : 'Optional'}</span></summary><div className="filter-panel-content"><div className="filter-options" role="group" aria-label="Filter audiobooks">{(['all', 'in-progress', 'not-started', 'completed'] as const).map(value => <button key={value} className={`filter-chip ${statusFilter === value ? 'active' : ''}`} aria-pressed={statusFilter === value} onClick={() => setStatusFilter(value)}>{value === 'all' ? 'All books' : value === 'in-progress' ? 'In progress' : value === 'not-started' ? 'Not started' : 'Finished'}</button>)}<button className={`filter-chip ${favoritesOnly ? 'active' : ''}`} aria-pressed={favoritesOnly} onClick={() => setFavoritesOnly(!favoritesOnly)}>Favorites</button></div><label className="sort-control"><span>Sort by</span><select value={sortBy} onChange={event => setSortBy(event.target.value as typeof sortBy)} aria-label="Sort audiobooks"><option value="title">Title</option><option value="author">Author</option><option value="duration">Longest</option><option value="rating">Top rated</option></select></label></div></details>
     {featureError && <div className="empty-state">{featureError}</div>}
     {books.some(book => (book.progress?.position ?? 0) > 0) && <><div className="tracks-heading"><div><h2>Continue listening</h2><p>Your saved place</p></div></div><div className="resume-shelf">{books.filter(book => (book.progress?.position ?? 0) > 0).slice(0, 5).map(book => { const track = book.tracks.find(item => item.id === book.progress?.track_id); return track ? <button key={book.id} onClick={() => onPlay(book)}><Cover src={book.cover || '/icon.svg'} alt="" /><span><strong>{book.title}</strong><small>{track.title || track.name} · {duration(book.progress?.position ?? 0)} listened</small></span></button> : null })}</div></>}
     {storage && <p className="storage-summary">{storage.tracks.toLocaleString()} files · {formatBytes(storage.bytes)} · {storage.formats.map(item => `${item.mime_type.replace('audio/', '').replace('application/', '')} ${item.count}`).join(' · ')}</p>}
@@ -156,10 +195,62 @@ function LibraryPage({ books, allBooks, features, storage, featureError, onFeatu
     {!loading && !error && <div className="results-count" aria-live="polite">Showing {books.length} {books.length === 1 ? 'audiobook' : 'audiobooks'}</div>}
     {scan && <ScanProgress scan={scan} onRefresh={onRefresh} />}
     {error && <div className="empty-state">{error} <a href="/auth/google">Sign in</a></div>}
-    {loading ? <LibrarySkeleton /> : <div className="media-grid">{books.map((book, index) => <MediaCard key={book.id} book={book} index={index} favorite={features.favorites.includes(book.id)} rating={features.ratings[book.id] ?? 0} tags={features.tags[book.id] ?? []} playlists={features.playlists} onFavorite={() => onFeature(book.id, 'favorite', !features.favorites.includes(book.id))} onRate={rating => onFeature(book.id, 'rating', rating)} onTag={() => { const tag = window.prompt('Add a tag'); if (tag?.trim()) onFeature(book.id, 'tags', [...(features.tags[book.id] ?? []), tag.trim()]) }} onAddToPlaylist={onAddToPlaylist} onOpen={() => onOpen(book)} onPlay={() => onPlay(book)} />)}</div>}
+    {loading ? <LibrarySkeleton /> : !error && <GroupGrid books={books} mode={groupMode} onOpenGroup={onOpenGroup} />}
     {!loading && !error && books.length === 0 && <div className="empty-state">{query || statusFilter !== 'all' ? 'No audiobooks match these filters.' : 'No audiobooks found. Refresh after you sign in.'}</div>}
     {features.history.length > 0 && <div className="tracks-heading"><div><h2>Listening history</h2><p>Recent activity</p></div></div>}
     {features.history.length > 0 && <div className="history-list">{features.history.slice(0, 10).map((item, index) => { const book = allBooks.find(entry => entry.id === item.book_id); const track = book?.tracks.find(entry => entry.id === item.track_id); return book && track ? <button key={`${item.book_id}-${item.played_at}-${index}`} onClick={() => onPlay(book)}><span>{book.title}</span><small>{track.title || track.name} · {new Date(item.played_at + 'Z').toLocaleString()}</small></button> : null })}</div>}
+  </section>
+}
+
+function GroupGrid({ books, mode, onOpenGroup }: { books: Book[]; mode: 'artist' | 'directory' | 'album'; onOpenGroup: (mode: 'artist' | 'directory' | 'album', name: string) => void }) {
+  if (mode === 'album') return <div className="media-grid">{books.map(book => <button className="group-card" key={book.id} onClick={() => onOpenGroup('album', book.album?.trim() || book.title)}><Cover className="media-cover" src={book.cover || '/icon.svg'} alt="" /><strong>{book.album?.trim() || book.title}</strong><span>{book.artist || 'Unknown artist'}</span></button>)}</div>
+  const groups = new Map<string, Book[]>()
+  for (const book of books) {
+    const path = book.directory || book.tracks[0]?.path || book.tracks[0]?.name || ''
+    const key = mode === 'artist' ? book.artist?.trim() || 'Unknown artist' : path.split('/')[0] || 'Root'
+    groups.set(key, [...(groups.get(key) ?? []), book])
+  }
+  const sorted = [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))
+  return sorted.length ? <div className="media-grid">{sorted.map(([name, members]) => <button className="group-card" key={name} onClick={() => onOpenGroup(mode, name)}><Cover className="media-cover" src={members[0].cover || '/icon.svg'} alt="" /><strong>{name}</strong><span>{members.length} {members.length === 1 ? 'album' : 'albums'}</span></button>)}</div> : <div className="empty-state">No groups found.</div>
+}
+
+function GroupPage({ books, onOpen, onOpenGroup }: { books: Book[]; onOpen: (book: Book) => void; onOpenGroup: (mode: 'artist' | 'directory' | 'album', name: string) => void }) {
+  const { mode = '' } = useParams()
+  const [params] = useSearchParams()
+  const name = params.get('name') || ''
+  const groupMode = mode === 'artist' || mode === 'directory' || mode === 'album' ? mode : 'artist'
+  const members = books.filter(book => groupMode === 'artist' ? (book.artist?.trim() || 'Unknown artist') === name : groupMode === 'album' ? (book.album?.trim() || book.title) === name : (book.directory || book.tracks[0]?.path || book.tracks[0]?.name || '').startsWith(name ? `${name}/` : ''))
+  const children = groupMode === 'directory' ? [...new Set(members.map(book => (book.directory || '').slice(name ? name.length + 1 : 0)).filter(path => path.includes('/')).map(path => path.split('/')[0]))] : groupMode === 'artist' ? [...new Set(members.map(book => book.album?.trim()).filter((album): album is string => Boolean(album)))] : []
+  const albums = groupMode === 'directory' ? members.filter(book => !(book.directory || '').slice(name ? name.length + 1 : 0).includes('/')) : groupMode === 'artist' && children.length ? members.filter(book => book.album?.trim() === name) : members
+  const title = name || (groupMode === 'artist' ? 'Artists' : groupMode === 'album' ? 'Albums' : 'Directories')
+  return <section className="library-page"><Link className="back-link" to="/"><ArrowLeft size={17} /> Your library</Link><div className="tracks-heading"><div><div className="eyebrow">{groupMode === 'artist' ? 'ARTIST' : groupMode === 'album' ? 'ALBUM' : 'DIRECTORY'}</div><h1>{title}</h1><p>{albums.length} {albums.length === 1 ? 'album' : 'albums'}{children.length ? ` · ${children.length} folders` : ''}</p></div></div>{children.length > 0 && <div className="media-grid">{children.map(child => { const path = groupMode === 'directory' ? name ? `${name}/${child}` : child : child; const cover = members.find(book => groupMode === 'artist' ? book.album === child : book.directory === path)?.cover; return <button className="group-card" key={path} onClick={() => onOpenGroup(groupMode === 'artist' ? 'album' : 'directory', path)}><Cover className="media-cover" src={cover || '/icon.svg'} alt="" /><strong>{child}</strong><span>{groupMode === 'artist' ? 'Album' : 'Folder'}</span></button> })}</div>}<div className="media-grid">{albums.map(book => <button className="group-card" key={book.id} onClick={() => onOpen(book)}><Cover className="media-cover" src={book.cover || '/icon.svg'} alt={`${book.title} cover`} /><strong>{book.title}</strong><span>{book.artist || book.directory || 'Audiobook'}</span></button>)}</div>{members.length === 0 && <div className="empty-state">No audiobooks found in this group.</div>}</section>
+}
+
+function SettingsPage({ reloadLibrary }: { reloadLibrary: () => void }) {
+  const [folders, setFolders] = useState<{ id: string; name: string; path: string }[]>([])
+  const [selected, setSelected] = useState<string[]>([])
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [saved, setSaved] = useState(false)
+  useEffect(() => {
+    void Promise.all([api<{ excluded_directories: typeof folders }>('/api/settings/excluded-directories'), api<typeof folders>('/api/directories')])
+      .then(([settings, list]) => { setFolders(list); setSelected(settings.excluded_directories.map(item => item.path)) })
+      .catch(e => setError(e instanceof Error ? e.message : 'Could not load Drive folders.'))
+      .finally(() => setLoading(false))
+  }, [])
+  const save = async () => {
+    setSaving(true); setError(''); setSaved(false)
+    try {
+      await api('/api/settings/excluded-directories', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paths: selected }) })
+      setSaved(true); reloadLibrary()
+    } catch (e) { setError(e instanceof Error ? e.message : 'Could not save exclusions.') }
+    finally { setSaving(false) }
+  }
+  return <section className="library-page settings-page"><div className="eyebrow"><Settings2 size={14} /> PREFERENCES</div><h1>Scan settings</h1><p className="settings-intro">Choose Drive folders to skip. Saving removes matching audio from your library and saved progress.</p>
+    {loading ? <LibrarySkeleton /> : <Card className="folder-picker"><h2>Google Drive folders</h2><p>Folders found in the scanned library. Select folders to exclude. Drive listing is not required.</p>{folders.length ? folders.map(folder => <label className="folder-option" key={folder.id}><input type="checkbox" checked={selected.includes(folder.path)} onChange={event => setSelected(current => event.target.checked ? [...current, folder.path] : current.filter(path => path !== folder.path))} /><span>{folder.path}</span></label>) : <p>No subfolders found.</p>}</Card>}
+    {error && <p className="settings-error" role="alert">{error}</p>}{saved && <p className="settings-saved" role="status">Exclusions saved. Start a scan to refresh the library.</p>}
+    <Button disabled={loading || saving} onClick={() => void save()}>{saving ? 'Saving…' : 'Save exclusions'}</Button>
   </section>
 }
 

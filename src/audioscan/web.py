@@ -128,6 +128,9 @@ class Database:
                     position REAL NOT NULL DEFAULT 0,
                     played_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+                CREATE TABLE IF NOT EXISTS excluded_directories (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL
+                );
             """)
 
     @contextmanager
@@ -311,6 +314,70 @@ class Database:
             "history": history,
         }
 
+    def scanned_directories(self) -> list[dict[str, str]]:
+        with self.connect() as db:
+            paths = [row[0] for row in db.execute("SELECT path FROM tracks")]
+        directories = {
+            "/".join(parts[:index])
+            for path in paths
+            if isinstance(path, str)
+            for parts in [path.strip("/").split("/")]
+            for index in range(1, len(parts))
+        }
+        directories.update(item["path"] for item in self.excluded_directories())
+        return [
+            {"id": path, "name": path.rsplit("/", 1)[-1], "path": path}
+            for path in sorted(directories, key=str.casefold)
+        ]
+
+    def excluded_directories(self) -> list[dict[str, str]]:
+        with self.connect() as db:
+            return [
+                dict(row)
+                for row in db.execute(
+                    "SELECT id,name,path FROM excluded_directories ORDER BY path COLLATE NOCASE"
+                )
+            ]
+
+    def replace_excluded_directories(self, directories: list[dict[str, str]]) -> None:
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("DELETE FROM excluded_directories")
+            db.executemany(
+                "INSERT INTO excluded_directories(id,name,path) VALUES(?,?,?)",
+                [(item["path"], item["name"], item["path"]) for item in directories],
+            )
+            prefixes = [item["path"].rstrip("/") + "/" for item in directories]
+            for row in db.execute("SELECT id,data FROM books").fetchall():
+                book = json.loads(row["data"])
+                kept = [
+                    track
+                    for track in book.get("tracks", [])
+                    if not any(track.get("path", "").startswith(prefix) for prefix in prefixes)
+                ]
+                removed = [track for track in book.get("tracks", []) if track not in kept]
+                for track in removed:
+                    db.execute("DELETE FROM tracks WHERE id=?", (track["id"],))
+                    db.execute("DELETE FROM listening_history WHERE track_id=?", (track["id"],))
+                    db.execute(
+                        "DELETE FROM progress WHERE book_id=? AND track_id=?",
+                        (row["id"], track["id"]),
+                    )
+                if not kept:
+                    db.execute("DELETE FROM progress WHERE book_id=?", (row["id"],))
+                    db.execute("DELETE FROM favorites WHERE book_id=?", (row["id"],))
+                    db.execute("DELETE FROM ratings WHERE book_id=?", (row["id"],))
+                    db.execute("DELETE FROM book_tags WHERE book_id=?", (row["id"],))
+                    db.execute("DELETE FROM playlist_books WHERE book_id=?", (row["id"],))
+                    db.execute("DELETE FROM books WHERE id=?", (row["id"],))
+                elif removed:
+                    book["tracks"] = kept
+                    book["duration"] = sum(track.get("duration", 0) for track in kept)
+                    db.execute(
+                        "UPDATE books SET duration=?,data=? WHERE id=?",
+                        (book["duration"], json.dumps(book), row["id"]),
+                    )
+
     def record_history(self, book_id: str, track_id: str, position: float = 0) -> None:
         with self.connect() as db:
             db.execute(
@@ -459,6 +526,19 @@ class LibraryScanner:
             failures = 0
             total = len(seen)
             processed = len(seen)
+            excluded_directories = self.db.excluded_directories()
+            excluded = {item["id"] for item in excluded_directories}
+            excluded_prefixes = [item["path"].rstrip("/") + "/" for item in excluded_directories]
+            items = [
+                item
+                for item in items
+                if not any(item.get("path", "").startswith(prefix) for prefix in excluded_prefixes)
+            ]
+            for item in self.db.pending_scan_items():
+                if any(item.get("path", "").startswith(prefix) for prefix in excluded_prefixes):
+                    with self.db.connect() as connection:
+                        connection.execute("DELETE FROM scan_items WHERE id=?", (item["id"],))
+            seen = {item["id"] for item in items}
             stack = [(self.config.folder_id, "")]
             visited: set[str] = set()
             while stack:
@@ -466,6 +546,11 @@ class LibraryScanner:
                 if folder_id in visited:
                     continue
                 visited.add(folder_id)
+                if folder_id in excluded or any(
+                    prefix.startswith(path) for path in excluded_prefixes
+                ):
+                    logger.info("Drive scan skipping excluded directory path=%s", prefix)
+                    continue
                 self.publish(
                     status="running",
                     total=total,
@@ -475,7 +560,16 @@ class LibraryScanner:
                 )
                 folders = list(source.iter_child_directories(folder_id, prefix))
                 logger.info("Drive scan folder listing complete folders=%d", len(folders))
-                stack.extend(reversed(folders))
+                stack.extend(
+                    reversed(
+                        [
+                            folder
+                            for folder in folders
+                            if folder[0] not in excluded
+                            and not any(folder[1].startswith(path) for path in excluded_prefixes)
+                        ]
+                    )
+                )
                 self.publish(
                     status="running",
                     total=total,
@@ -634,6 +728,7 @@ class LibraryScanner:
                     "path": original["path"],
                     "size": original["size"] or 0,
                     "mime_type": original["mime_type"],
+                    "album": meta.get("album"),
                     "title": meta.get("title") or original["name"],
                     "duration": meta.get("duration") or 0,
                     "chapters": meta.get("chapters") or [],
@@ -648,6 +743,10 @@ class LibraryScanner:
                     "id": group.key,
                     "title": group.title,
                     "artist": first.albumartist or first.artist,
+                    "album": first.album or group.title,
+                    "directory": members[0]["path"].rsplit("/", 1)[0]
+                    if "/" in members[0]["path"]
+                    else "",
                     "cover": f"/api/tracks/{members[0]['id']}/cover" if first.covers else None,
                     "duration": group.total_duration,
                     "tracks": members,
@@ -1032,6 +1131,50 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
         db.record_history(book_id, track_id)
         return Response(status_code=204)
 
+    @app.get("/api/directories")
+    def directories(request: Request) -> list[dict[str, str]]:
+        user(request)
+        return db.scanned_directories()
+
+    @app.put("/api/settings/excluded-directories")
+    async def update_excluded_directories(request: Request) -> dict[str, Any]:
+        user(request)
+        body = await request.json()
+        paths = body.get("paths") if isinstance(body, dict) else None
+        if (
+            not isinstance(paths, list)
+            or len(paths) > 500
+            or any(not isinstance(path, str) for path in paths)
+        ):
+            raise HTTPException(422, "paths must be a list of at most 500 directory paths")
+        available = {item["path"]: item for item in db.scanned_directories()}
+        if len(set(paths)) != len(paths) or any(path not in available for path in paths):
+            raise HTTPException(422, "excluded paths must be unique scanned directories")
+        if not scanner.lock.acquire(blocking=False):
+            raise HTTPException(
+                409, "Wait for the active library scan to finish before changing exclusions"
+            )
+        chosen = [available[path] for path in paths]
+        chosen = [
+            item
+            for item in chosen
+            if not any(
+                item["path"].startswith(parent["path"].rstrip("/") + "/")
+                for parent in chosen
+                if parent["path"] != item["path"]
+            )
+        ]
+        try:
+            db.replace_excluded_directories(chosen)
+        finally:
+            scanner.lock.release()
+        return {"excluded_directories": chosen}
+
+    @app.get("/api/settings/excluded-directories")
+    def get_excluded_directories(request: Request) -> dict[str, Any]:
+        user(request)
+        return {"excluded_directories": db.excluded_directories()}
+
     @app.get("/api/storage")
     def storage(request: Request) -> dict[str, Any]:
         user(request)
@@ -1123,18 +1266,31 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
         length = end - start + 1
 
         def chunks() -> Iterator[bytes]:
+            drive_read_ms = 0.0
+            drive_reads = 0
+            bytes_yielded = 0
             try:
                 reader.seek(start)
                 remaining = length
                 while remaining:
+                    read_started = time.perf_counter()
                     chunk = reader.read(min(64 * 1024, remaining))
+                    drive_read_ms += (time.perf_counter() - read_started) * 1000
                     if not chunk:
                         break
+                    drive_reads += 1
+                    bytes_yielded += len(chunk)
                     remaining -= len(chunk)
                     yield chunk
             except FetchError as exc:
                 raise HTTPException(502, f"Drive audio stream failed: {exc}") from exc
             finally:
+                logger.info(
+                    "Drive stream metrics reads=%d read_ms=%d bytes=%d",
+                    drive_reads,
+                    round(drive_read_ms),
+                    bytes_yielded,
+                )
                 reader.close()
                 client.close()
 
@@ -1153,6 +1309,36 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
         else:
             status = 200
         return StreamingResponse(chunks(), status_code=status, media_type=mime, headers=headers)
+
+    @app.post("/api/tracks/{track_id}/playback-metrics", status_code=204)
+    async def playback_metrics(track_id: str, request: Request) -> Response:
+        user(request)
+        if db.track(track_id) is None:
+            raise HTTPException(404, "Track not found")
+        body = await request.json()
+        fields = {
+            "startupMs": (0, 600_000),
+            "stalls": (0, 10_000),
+            "bufferedAhead": (0, 86_400),
+            "rangeMs": (0, 86_400_000),
+            "rangeBytes": (0, 1_000_000_000_000),
+            "ranges": (0, 100_000),
+        }
+        if not isinstance(body, dict) or any(
+            type(body.get(key)) is not int or not low <= body[key] <= high
+            for key, (low, high) in fields.items()
+        ):
+            raise HTTPException(422, "invalid playback metrics")
+        if body["ranges"] and body["rangeBytes"] > body["ranges"] * (16 * 1024 * 1024):
+            raise HTTPException(422, "rangeBytes exceeds per-session limit")
+        logger.info(
+            "Playback metrics startup_ms=%d stalls=%d buffered_ahead_s=%d ranges=%d",
+            body["startupMs"],
+            body["stalls"],
+            body["bufferedAhead"],
+            body["ranges"],
+        )
+        return Response(status_code=204)
 
     @app.get("/api/tracks/{track_id}/cover")
     def cover(track_id: str, request: Request) -> Response:

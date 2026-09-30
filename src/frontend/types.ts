@@ -4,6 +4,7 @@ export type Track = {
   book_id: string
   title: string
   name: string
+  path?: string
   duration: number
   chapters: Chapter[]
   chapter_count?: number
@@ -14,6 +15,8 @@ export type Book = {
   id: string
   title: string
   artist?: string | null
+  album?: string | null
+  directory?: string | null
   cover?: string | null
   duration: number
   tracks: Track[]
