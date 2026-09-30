@@ -3,9 +3,9 @@ import { LoaderCircle, Moon, Pause, Play, RotateCcw, RotateCw, SkipBack, SkipFor
 import type { Book, Track } from '../types'
 import { Cover, IconButton } from './ui'
 
-type Props = { book: Book | null; track: Track | null; start: number; canNext: boolean; canPrevious: boolean; onNext: () => void; onPrevious: () => void; onTime: (time: number) => void; onCheckpoint: (time: number) => void }
+type Props = { book: Book | null; track: Track | null; start: number; autoPlay: boolean; onResume: () => void; canNext: boolean; canPrevious: boolean; onNext: () => void; onPrevious: () => void; onTime: (time: number) => void; onCheckpoint: (time: number) => void }
 
-export function PlayerBar({ book, track, start, canNext, canPrevious, onNext, onPrevious, onTime, onCheckpoint }: Props) {
+export function PlayerBar({ book, track, start, autoPlay, onResume, canNext, canPrevious, onNext, onPrevious, onTime, onCheckpoint }: Props) {
   const audio = useRef<HTMLAudioElement>(null)
   const [playing, setPlaying] = useState(false)
   const [playError, setPlayError] = useState(false)
@@ -45,6 +45,8 @@ export function PlayerBar({ book, track, start, canNext, canPrevious, onNext, on
     Object.assign(state, { requestedAt: performance.now(), startedAt: 0, stalls: 0, rangeMs: 0, rangeBytes: 0, ranges: 0, lastSent: 0 })
     setMetrics({ startupMs: 0, stalls: 0, bufferedAhead: 0, rangeMs: 0, rangeBytes: 0, ranges: 0 })
     player.playbackRate = Number(playbackRate)
+    setTime(start)
+    setDuration(track.duration || 0)
     player.src = `/api/tracks/${encodeURIComponent(track.id)}/audio`
     setBuffering(true)
     player.load()
@@ -60,7 +62,7 @@ export function PlayerBar({ book, track, start, canNext, canPrevious, onNext, on
         void fetch(`/api/tracks/${encodeURIComponent(track.id)}/playback-metrics`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(snapshot), keepalive: true })
       }
     }
-    const seek = () => { player.currentTime = start; setPlayError(false); void player.play().then(() => setPlayError(false)).catch(() => { setBuffering(false); setPlayError(true) }) }
+    const seek = () => { player.currentTime = start; setPlayError(false); if (autoPlay) void player.play().then(() => setPlayError(false)).catch(() => { setBuffering(false); setPlayError(true) }); else setBuffering(false) }
     const bufferingStart = () => { state.stalls += 1; setBuffering(true); report(true) }
     const bufferingEnd = () => { setBuffering(false); report(true) }
     const playbackStarted = () => { if (!state.startedAt) state.startedAt = performance.now(); report(true) }
@@ -95,7 +97,7 @@ export function PlayerBar({ book, track, start, canNext, canPrevious, onNext, on
       player.removeEventListener('canplay', bufferingEnd)
       player.removeEventListener('error', loadFailed)
     }
-  }, [track?.id, start])
+  }, [track?.id, start, autoPlay])
   return <footer className="player-bar">
     <audio ref={audio} preload="metadata" onTimeUpdate={event => { const player = event.currentTarget; const value = player.currentTime; setTime(value); onTime(value); const ahead = player.buffered.length ? Math.max(0, player.buffered.end(player.buffered.length - 1) - value) : 0; setMetrics(current => ({ ...current, bufferedAhead: Math.round(ahead) })) }} onDurationChange={event => setDuration(event.currentTarget.duration || 0)} onEnded={event => { onCheckpoint(event.currentTarget.currentTime); if (sleepAtEnd.current) { sleepAtEnd.current = false; setSleepMinutes('off'); setSleepEndsAt(0) } else onNext() }} onPause={event => { onCheckpoint(event.currentTarget.currentTime); setPlaying(false) }} onPlay={() => setPlaying(true)} />
     {playError && <button className="play-retry" onClick={() => { const player = audio.current; if (!player) return; const position = player.currentTime || start; player.src = `/api/tracks/${encodeURIComponent(track?.id ?? '')}/audio`; player.load(); player.addEventListener('loadedmetadata', () => { player.currentTime = position; void player.play().then(() => setPlayError(false)).catch(() => setPlayError(true)) }, { once: true }) }}>Retry audio</button>}
@@ -108,7 +110,7 @@ export function PlayerBar({ book, track, start, canNext, canPrevious, onNext, on
     <div className="player-controls">
       <IconButton className="track-skip" aria-label="Previous track" disabled={!canPrevious} onClick={onPrevious}><SkipBack size={18} /></IconButton>
       <IconButton className="seek-skip" aria-label="Back 15 seconds" disabled={!track} onClick={() => { if (audio.current) audio.current.currentTime = Math.max(0, audio.current.currentTime - 15) }}><RotateCcw size={17} /><span>15</span></IconButton>
-      <IconButton aria-label={buffering ? 'Buffering audio' : playing ? 'Pause' : 'Play'} className="play-toggle" disabled={!track || buffering} onClick={() => { const p = audio.current; if (p?.paused) void p.play(); else p?.pause() }}>{buffering ? <LoaderCircle className="spin" size={18} /> : playing ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}</IconButton>
+      <IconButton aria-label={buffering ? 'Buffering audio' : playing ? 'Pause' : 'Play'} className="play-toggle" disabled={!track || buffering} onClick={() => { const p = audio.current; if (!autoPlay) onResume(); else if (p?.paused) void p.play(); else p?.pause() }}>{buffering ? <LoaderCircle className="spin" size={20} /> : playing ? <Pause size={20} fill="currentColor" /> : <Play size={20} fill="currentColor" />}</IconButton>
       <IconButton className="seek-skip" aria-label="Forward 15 seconds" disabled={!track} onClick={() => { if (audio.current) audio.current.currentTime = Math.min(duration, audio.current.currentTime + 15) }}><RotateCw size={17} /><span>15</span></IconButton>
       <IconButton className="track-skip" aria-label="Next track" disabled={!canNext} onClick={onNext}><SkipForward size={18} /></IconButton>
     </div>

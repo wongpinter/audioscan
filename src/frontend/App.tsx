@@ -19,7 +19,8 @@ function App() {
   const [books, setBooks] = useState<Book[]>([])
   const [filter, setFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | 'in-progress' | 'not-started' | 'completed'>('all')
-  const [sortBy, setSortBy] = useState<'title' | 'author' | 'duration' | 'rating'>('title')
+  const [sortBy, setSortBy] = useState<'title' | 'author' | 'duration' | 'rating' | 'added'>('title')
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc')
   const [groupMode, setGroupMode] = useState<'artist' | 'directory' | 'album'>('artist')
   const [favoritesOnly, setFavoritesOnly] = useState(false)
   const [playlistView, setPlaylistView] = useState<string | null>(null)
@@ -32,6 +33,7 @@ function App() {
   const [activeBook, setActiveBook] = useState<Book | null>(null)
   const [activeTrack, setActiveTrack] = useState<Track | null>(null)
   const [startAt, setStartAt] = useState(0)
+  const [autoPlay, setAutoPlay] = useState(false)
   const [resumeBook, setResumeBook] = useState<Book | null>(null)
   const navigate = useNavigate()
   const progressState = useRef({ lastSentAt: 0, latest: null as { bookId: string; trackId: string; position: number } | null })
@@ -48,11 +50,13 @@ function App() {
       const savedBook = saved && result.find(item => item.id === saved?.bookId && item.tracks.some(track => track.id === saved?.trackId))
       let pending: { bookId: string; trackId: string; position: number } | null = null
       try { pending = JSON.parse(localStorage.getItem('ruangdengar.pending-progress') || 'null') } catch { /* storage can be disabled */ }
-      const book = savedBook || result.find(item => item.id === lastPlayed)
+      const latestBook = result.find(item => item.id === lastPlayed)
+      const book = latestBook || savedBook
+      const savedMatchesLatest = !!(savedBook && book?.id === savedBook.id)
       const pendingMatchesSaved = !!(saved && pending?.bookId === saved.bookId && pending.trackId === saved.trackId)
-      const recovery = savedBook
-        ? { ...savedBook, progress: { track_id: saved!.trackId, position: pendingMatchesSaved ? pending!.position : saved!.position } }
-        : book?.progress?.track_id ? book : result.find(item => (item.progress?.position ?? 0) > 0 && item.tracks.some(track => track.id === item.progress?.track_id))
+      const recovery = savedMatchesLatest
+        ? { ...savedBook!, progress: { track_id: saved!.trackId, position: pendingMatchesSaved ? pending!.position : saved!.position } }
+        : book?.progress?.track_id ? book : null
       setResumeBook(recovery || null)
       result.filter(book => (book.progress?.position ?? 0) > 0).slice(0, 3).forEach(book => { const track = book.tracks.find(item => item.id === book.progress?.track_id); if (track) void fetch(`/api/tracks/${encodeURIComponent(track.id)}/warm`, { method: 'POST', credentials: 'same-origin' }).catch(() => {}) })
       setError('')
@@ -102,14 +106,20 @@ function App() {
       if (statusFilter === 'completed') return ratio >= 0.95
       return true
     })
-    .sort((a, b) => sortBy === 'author'
-      ? (a.artist ?? '').localeCompare(b.artist ?? '') || a.title.localeCompare(b.title)
-      : sortBy === 'duration' ? b.duration - a.duration : sortBy === 'rating' ? (features.ratings[b.id] ?? 0) - (features.ratings[a.id] ?? 0) : a.title.localeCompare(b.title)),
-  [books, filter, statusFilter, sortBy, features, favoritesOnly, playlistView])
+    .sort((a, b) => {
+      const order = sortBy === 'author' ? (a.artist ?? '').localeCompare(b.artist ?? '') || a.title.localeCompare(b.title)
+        : sortBy === 'duration' ? a.duration - b.duration
+          : sortBy === 'rating' ? (features.ratings[a.id] ?? 0) - (features.ratings[b.id] ?? 0)
+            : sortBy === 'added' ? (a.added_at ?? '').localeCompare(b.added_at ?? '')
+              : a.title.localeCompare(b.title)
+      return sortDirection === 'asc' ? order : -order
+    }),
+  [books, filter, statusFilter, sortBy, sortDirection, features, favoritesOnly, playlistView])
   const play = (book: Book, track: Track, start = 0) => {
     currentListen.current = { bookId: book.id, trackId: track.id }
     try { localStorage.setItem('ruangdengar.last-listening', JSON.stringify({ bookId: book.id, trackId: track.id, position: start })) } catch { /* storage can be disabled */ }
     setResumeBook(null)
+    setAutoPlay(true)
     void fetch(`/api/history/${encodeURIComponent(book.id)}`, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ track_id: track.id }) })
     void fetch(`/api/tracks/${encodeURIComponent(track.id)}/warm`, { method: 'POST', credentials: 'same-origin' }).catch(() => {})
     setActiveBook(book); setActiveTrack(track); setStartAt(start)
@@ -204,15 +214,14 @@ function App() {
     <main className="main-content"><Routes>
       <Route path="/" element={<HomePage books={filtered} features={features} scan={scan} error={error} onOpen={openBook} onPlay={playBook} onLibrary={() => navigate('/library')} onRefresh={() => void refreshLibrary()} />} />
       <Route path="/search" element={<SearchPage books={filtered} query={filter} setQuery={setFilter} onOpen={openBook} />} />
-      <Route path="/library" element={<LibraryPage groupMode={groupMode} setGroupMode={setGroupMode} onOpenGroup={groupLink} books={filtered} allBooks={books} features={features} storage={storage} featureError={featureError} onFeature={updateBookFeature} favoritesOnly={favoritesOnly} setFavoritesOnly={setFavoritesOnly} onCreatePlaylist={makePlaylist} onAddToPlaylist={addToPlaylist} onPlaylistView={setPlaylistView} playlistView={playlistView} reloadFeatures={loadFeatures} query={filter} setQuery={setFilter} statusFilter={statusFilter} setStatusFilter={setStatusFilter} sortBy={sortBy} setSortBy={setSortBy} error={error} loading={loading} scan={scan} onRefresh={() => void refreshLibrary()} onOpen={openBook} onPlay={playBook} />} />
+      <Route path="/library" element={<LibraryPage sortDirection={sortDirection} setSortDirection={setSortDirection} groupMode={groupMode} setGroupMode={setGroupMode} onOpenGroup={groupLink} books={filtered} allBooks={books} features={features} storage={storage} featureError={featureError} onFeature={updateBookFeature} favoritesOnly={favoritesOnly} setFavoritesOnly={setFavoritesOnly} onCreatePlaylist={makePlaylist} onAddToPlaylist={addToPlaylist} onPlaylistView={setPlaylistView} playlistView={playlistView} reloadFeatures={loadFeatures} query={filter} setQuery={setFilter} statusFilter={statusFilter} setStatusFilter={setStatusFilter} sortBy={sortBy} setSortBy={setSortBy} error={error} loading={loading} scan={scan} onRefresh={() => void refreshLibrary()} onOpen={openBook} onPlay={playBook} />} />
       <Route path="/group/:mode" element={<GroupPage books={filtered} onOpen={openBook} onOpenGroup={groupLink} />} />
       <Route path="/book/:bookId" element={<BookPage onPlay={play} />} />
       <Route path="/settings" element={<SettingsPage reloadLibrary={load} />} />
       <Route path="*" element={<div className="empty-state">Page not found.</div>} />
     </Routes></main>
     <BottomNavigation />
-    {resumeBook && !activeTrack && <button className="resume-player" onClick={() => { const track = resumeBook.tracks.find(item => item.id === resumeBook.progress?.track_id); if (track) { play(resumeBook, track, resumeBook.progress?.position ?? 0); setResumeBook(null) } }}>Resume listening · {resumeBook.title}</button>}
-    <PlayerBar book={activeBook} track={activeTrack} start={startAt} canNext={queueIndex >= 0 && queueIndex < trackQueue.length - 1} canPrevious={queueIndex > 0} onNext={() => moveTrack(1)} onPrevious={() => moveTrack(-1)} onTime={saveProgress} onCheckpoint={time => saveProgress(time, true)} />
+    <PlayerBar book={activeBook ?? resumeBook} track={activeTrack ?? (resumeBook?.tracks.find(item => item.id === resumeBook.progress?.track_id) ?? null)} start={activeTrack ? startAt : resumeBook?.progress?.position ?? 0} autoPlay={autoPlay} onResume={() => { if (!activeTrack && resumeBook) { const track = resumeBook.tracks.find(item => item.id === resumeBook.progress?.track_id); if (track) play(resumeBook, track, resumeBook.progress?.position ?? 0) } else { void document.querySelector<HTMLAudioElement>('.player-bar audio')?.play() } }} canNext={activeTrack ? queueIndex >= 0 && queueIndex < trackQueue.length - 1 : false} canPrevious={queueIndex > 0} onNext={() => moveTrack(1)} onPrevious={() => moveTrack(-1)} onTime={saveProgress} onCheckpoint={time => saveProgress(time, true)} />
   </div>
 }
 
@@ -259,7 +268,7 @@ function SectionHeader({ title, subtitle, action, onAction }: { title: string; s
   return <div className="section-heading"><div><h2>{title}</h2>{subtitle && <p>{subtitle}</p>}</div>{action && <button className="section-action" onClick={onAction}>{action}<ArrowLeft className="section-action-arrow" size={15} /></button>}</div>
 }
 
-function LibraryPage({ groupMode, setGroupMode, onOpenGroup, books, allBooks, features, storage, featureError, onFeature, favoritesOnly, setFavoritesOnly, playlistView, onPlaylistView, reloadFeatures, onCreatePlaylist, onAddToPlaylist, query, setQuery, statusFilter, setStatusFilter, sortBy, setSortBy, error, loading, scan, onRefresh, onOpen, onPlay }: { groupMode: 'artist' | 'directory' | 'album'; setGroupMode: (value: 'artist' | 'directory' | 'album') => void; onOpenGroup: (mode: 'artist' | 'directory' | 'album', name: string) => void; books: Book[]; allBooks: Book[]; features: Features; storage: StorageInfo | null; featureError: string; onFeature: (bookId: string, kind: 'favorite' | 'rating' | 'tags', value: boolean | number | string[]) => void; favoritesOnly: boolean; setFavoritesOnly: (value: boolean) => void; playlistView: string | null; onPlaylistView: (value: string | null) => void; reloadFeatures: () => void; onCreatePlaylist: () => void; onAddToPlaylist: (playlistId: string, bookId: string) => void; query: string; setQuery: (value: string) => void; statusFilter: 'all' | 'in-progress' | 'not-started' | 'completed'; setStatusFilter: (value: 'all' | 'in-progress' | 'not-started' | 'completed') => void; sortBy: 'title' | 'author' | 'duration' | 'rating'; setSortBy: (value: 'title' | 'author' | 'duration' | 'rating') => void; error: string; loading: boolean; scan: ScanStatus | null; onRefresh: () => void; onOpen: (book: Book) => void; onPlay: (book: Book) => void }) {
+function LibraryPage({ groupMode, setGroupMode, onOpenGroup, books, allBooks, features, storage, featureError, onFeature, favoritesOnly, setFavoritesOnly, playlistView, onPlaylistView, reloadFeatures, onCreatePlaylist, onAddToPlaylist, query, setQuery, statusFilter, setStatusFilter, sortBy, setSortBy, sortDirection, setSortDirection, error, loading, scan, onRefresh, onOpen, onPlay }: { groupMode: 'artist' | 'directory' | 'album'; setGroupMode: (value: 'artist' | 'directory' | 'album') => void; onOpenGroup: (mode: 'artist' | 'directory' | 'album', name: string) => void; books: Book[]; allBooks: Book[]; features: Features; storage: StorageInfo | null; featureError: string; onFeature: (bookId: string, kind: 'favorite' | 'rating' | 'tags', value: boolean | number | string[]) => void; favoritesOnly: boolean; setFavoritesOnly: (value: boolean) => void; playlistView: string | null; onPlaylistView: (value: string | null) => void; reloadFeatures: () => void; onCreatePlaylist: () => void; onAddToPlaylist: (playlistId: string, bookId: string) => void; query: string; setQuery: (value: string) => void; statusFilter: 'all' | 'in-progress' | 'not-started' | 'completed'; setStatusFilter: (value: 'all' | 'in-progress' | 'not-started' | 'completed') => void; sortBy: 'title' | 'author' | 'duration' | 'rating' | 'added'; setSortBy: (value: 'title' | 'author' | 'duration' | 'rating' | 'added') => void; sortDirection: 'asc' | 'desc'; setSortDirection: (value: 'asc' | 'desc') => void; error: string; loading: boolean; scan: ScanStatus | null; onRefresh: () => void; onOpen: (book: Book) => void; onPlay: (book: Book) => void }) {
   const seenRecentAlbums = new Set<string>()
   const recentBooks = features.history.flatMap(item => {
     const book = allBooks.find(entry => entry.id === item.book_id)
@@ -276,7 +285,7 @@ function LibraryPage({ groupMode, setGroupMode, onOpenGroup, books, allBooks, fe
     <div className="hero"><div><div className="eyebrow"><BookOpen size={14} /> YOUR COLLECTION</div><h1>Your library</h1><p>Stories for wherever the day takes you.</p></div><div className="hero-art"><Headphones size={88} strokeWidth={1.1} /></div></div>
     <div className="library-heading"><div className="library-heading-copy"><h2>All audiobooks</h2><span>{books.length.toLocaleString()} titles</span></div><label className="search-box"><Search size={17} /><Input placeholder="Search your library" value={query} onChange={event => setQuery(event.target.value)} /></label></div>
     <div className="group-toolbar" role="group" aria-label="Browse audiobooks by"><span className="browse-label">Browse by</span>{(['artist', 'directory', 'album'] as const).map(mode => <button key={mode} className={groupMode === mode ? 'active' : ''} aria-pressed={groupMode === mode} onClick={() => setGroupMode(mode)}>{mode[0].toUpperCase() + mode.slice(1)}</button>)}</div>
-    <details className="filter-panel"><summary><SlidersHorizontal size={16} /><span>Filters and sort</span><span className="filter-summary-state">{statusFilter !== 'all' || favoritesOnly || sortBy !== 'title' ? 'Applied' : 'Optional'}</span></summary><div className="filter-panel-content"><div className="filter-options" role="group" aria-label="Filter audiobooks">{(['all', 'in-progress', 'not-started', 'completed'] as const).map(value => <button key={value} className={`filter-chip ${statusFilter === value ? 'active' : ''}`} aria-pressed={statusFilter === value} onClick={() => setStatusFilter(value)}>{value === 'all' ? 'All books' : value === 'in-progress' ? 'In progress' : value === 'not-started' ? 'Not started' : 'Finished'}</button>)}<button className={`filter-chip ${favoritesOnly ? 'active' : ''}`} aria-pressed={favoritesOnly} onClick={() => setFavoritesOnly(!favoritesOnly)}>Favorites</button></div><label className="sort-control"><span>Sort by</span><select value={sortBy} onChange={event => setSortBy(event.target.value as typeof sortBy)} aria-label="Sort audiobooks"><option value="title">Title</option><option value="author">Author</option><option value="duration">Longest</option><option value="rating">Top rated</option></select></label></div></details>
+    <details className="filter-panel"><summary><SlidersHorizontal size={16} /><span>Filters and sort</span><span className="filter-summary-state">{statusFilter !== 'all' || favoritesOnly || sortBy !== 'title' ? 'Applied' : 'Optional'}</span></summary><div className="filter-panel-content"><div className="filter-options" role="group" aria-label="Filter audiobooks">{(['all', 'in-progress', 'not-started', 'completed'] as const).map(value => <button key={value} className={`filter-chip ${statusFilter === value ? 'active' : ''}`} aria-pressed={statusFilter === value} onClick={() => setStatusFilter(value)}>{value === 'all' ? 'All books' : value === 'in-progress' ? 'In progress' : value === 'not-started' ? 'Not started' : 'Finished'}</button>)}<button className={`filter-chip ${favoritesOnly ? 'active' : ''}`} aria-pressed={favoritesOnly} onClick={() => setFavoritesOnly(!favoritesOnly)}>Favorites</button></div><label className="sort-control"><span>Sort by</span><select value={sortBy} onChange={event => setSortBy(event.target.value as typeof sortBy)} aria-label="Sort audiobooks"><option value="title">Title</option><option value="author">Author</option><option value="duration">Duration</option><option value="rating">Rating</option><option value="added">Added</option></select><select value={sortDirection} onChange={event => setSortDirection(event.target.value as typeof sortDirection)} aria-label="Sort direction"><option value="asc">Ascending</option><option value="desc">Descending</option></select></label></div></details>
     {featureError && <div className="empty-state">{featureError}</div>}
     {books.some(book => (book.progress?.position ?? 0) > 0) && <><div className="tracks-heading"><div><h2>Continue listening</h2><p>Your saved place</p></div></div><div className="resume-shelf">{books.filter(book => (book.progress?.position ?? 0) > 0).slice(0, 5).map(book => { const track = book.tracks.find(item => item.id === book.progress?.track_id); return track ? <button key={book.id} onClick={() => onPlay(book)}><Cover src={book.cover || '/icon.svg'} alt="" /><span><strong>{book.title}</strong><small>{track.title || track.name} · {duration(book.progress?.position ?? 0)} listened</small></span></button> : null })}</div></>}
     {storage && <p className="storage-summary">{storage.tracks.toLocaleString()} files · {formatBytes(storage.bytes)} · {storage.formats.map(item => `${item.mime_type.replace('audio/', '').replace('application/', '')} ${item.count}`).join(' · ')}</p>}
@@ -286,23 +295,38 @@ function LibraryPage({ groupMode, setGroupMode, onOpenGroup, books, allBooks, fe
     {!loading && !error && <div className="results-count" aria-live="polite">Showing {books.length} {books.length === 1 ? 'audiobook' : 'audiobooks'}</div>}
     {scan && <ScanProgress scan={scan} onRefresh={onRefresh} />}
     {error && <div className="empty-state">{error} <a href="/auth/google">Sign in</a></div>}
-    {loading ? <LibrarySkeleton /> : !error && <GroupGrid books={books} mode={groupMode} onOpenGroup={onOpenGroup} />}
+    {loading ? <LibrarySkeleton /> : !error && <GroupGrid books={books} mode={groupMode} sortBy={sortBy} sortDirection={sortDirection} ratings={features.ratings} onOpenGroup={onOpenGroup} />}
     {!loading && !error && books.length === 0 && <div className="empty-state">{query || statusFilter !== 'all' ? 'No audiobooks match these filters.' : 'No audiobooks found. Refresh after you sign in.'}</div>}
     {features.history.length > 0 && <div className="tracks-heading"><div><h2>Listening history</h2><p>Recent activity</p></div></div>}
     {features.history.length > 0 && <div className="history-list">{features.history.slice(0, 10).map((item, index) => { const book = allBooks.find(entry => entry.id === item.book_id); const track = book?.tracks.find(entry => entry.id === item.track_id); return book && track ? <button key={`${item.book_id}-${item.played_at}-${index}`} onClick={() => onPlay(book)}><span>{book.title}</span><small>{track.title || track.name} · {new Date(item.played_at + 'Z').toLocaleString()}</small></button> : null })}</div>}
   </section>
 }
 
-function GroupGrid({ books, mode, onOpenGroup }: { books: Book[]; mode: 'artist' | 'directory' | 'album'; onOpenGroup: (mode: 'artist' | 'directory' | 'album', name: string) => void }) {
-  if (mode === 'album') return <div className="media-grid">{books.map(book => <button className="group-card" key={book.id} onClick={() => onOpenGroup('album', book.album?.trim() || book.title)}><Cover className="media-cover" src={book.cover || '/icon.svg'} alt="" /><strong>{book.album?.trim() || book.title}</strong><span>{book.artist || 'Unknown artist'}</span></button>)}</div>
+function GroupGrid({ books, mode, sortBy, sortDirection, ratings, onOpenGroup }: { books: Book[]; mode: 'artist' | 'directory' | 'album'; sortBy: 'title' | 'author' | 'duration' | 'rating' | 'added'; sortDirection: 'asc' | 'desc'; ratings: Record<string, number>; onOpenGroup: (mode: 'artist' | 'directory' | 'album', name: string) => void }) {
+  const direction = sortDirection === 'asc' ? 1 : -1
+  const orderedBooks = [...books].sort((a, b) => {
+    const primary = sortBy === 'author' ? (a.artist ?? '').localeCompare(b.artist ?? '')
+      : sortBy === 'duration' ? a.duration - b.duration
+        : sortBy === 'rating' ? (ratings[a.id] ?? 0) - (ratings[b.id] ?? 0)
+          : sortBy === 'added' ? (a.added_at ?? '').localeCompare(b.added_at ?? '')
+            : (a.album?.trim() || a.title).localeCompare(b.album?.trim() || b.title)
+    return direction * (primary || a.title.localeCompare(b.title))
+  })
+  if (mode === 'album') return <div className="media-grid">{orderedBooks.map(book => <button className="group-card" key={book.id} onClick={() => onOpenGroup('album', book.album?.trim() || book.title)}><Cover className="media-cover" src={book.cover || '/icon.svg'} alt="" /><strong>{book.album?.trim() || book.title}</strong><span>{book.artist || 'Unknown artist'}</span></button>)}</div>
   const groups = new Map<string, Book[]>()
-  for (const book of books) {
+  for (const book of orderedBooks) {
     const path = book.directory || book.tracks[0]?.path || book.tracks[0]?.name || ''
     const key = mode === 'artist' ? book.artist?.trim() || 'Unknown artist' : path.split('/')[0] || 'Root'
     groups.set(key, [...(groups.get(key) ?? []), book])
   }
-  const sorted = [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))
-  return sorted.length ? <div className="media-grid">{sorted.map(([name, members]) => <button className="group-card" key={name} onClick={() => onOpenGroup(mode, name)}><Cover className="media-cover" src={members[0].cover || '/icon.svg'} alt="" /><strong>{name}</strong><span>{members.length} {members.length === 1 ? 'album' : 'albums'}</span></button>)}</div> : <div className="empty-state">No groups found.</div>
+  const sortedGroups = [...groups.entries()].sort(([nameA, membersA], [nameB, membersB]) => {
+    const primary = sortBy === 'duration' ? membersA.reduce((sum, book) => sum + book.duration, 0) - membersB.reduce((sum, book) => sum + book.duration, 0)
+      : sortBy === 'rating' ? Math.max(...membersA.map(book => ratings[book.id] ?? 0)) - Math.max(...membersB.map(book => ratings[book.id] ?? 0))
+        : sortBy === 'added' ? (membersA[0]?.added_at ?? '').localeCompare(membersB[0]?.added_at ?? '')
+          : sortBy === 'author' ? nameA.localeCompare(nameB) : nameA.localeCompare(nameB)
+    return direction * primary
+  })
+  return groups.size ? <div className="media-grid">{sortedGroups.map(([name, members]) => <button className="group-card" key={name} onClick={() => onOpenGroup(mode, name)}><Cover className="media-cover" src={members[0].cover || '/icon.svg'} alt="" /><strong>{name}</strong><span>{members.length} {members.length === 1 ? 'album' : 'albums'}</span></button>)}</div> : <div className="empty-state">No groups found.</div>
 }
 
 function GroupPage({ books, onOpen, onOpenGroup }: { books: Book[]; onOpen: (book: Book) => void; onOpenGroup: (mode: 'artist' | 'directory' | 'album', name: string) => void }) {
