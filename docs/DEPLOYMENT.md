@@ -45,7 +45,7 @@ Build the frontend and start the service:
 npm ci
 npm run build
 uv sync --extra web
-uv run ruangdengar-web --host 0.0.0.0 --port 8111
+APP_HOST=0.0.0.0 APP_PORT=8111 uv run ruangdengar-web
 ```
 
 Configure the HTTPS proxy to forward requests to the Uvicorn port. Set trusted proxy headers for the proxy IP only. Use a process manager that restarts the service after failure and host reboot.

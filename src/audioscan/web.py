@@ -9,11 +9,12 @@ import os
 import re
 import secrets
 import sqlite3
+import tempfile
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -277,7 +278,12 @@ class Database:
     def book(self, book_id: str) -> dict[str, Any] | None:
         with self.connect() as db:
             row = db.execute("SELECT data FROM books WHERE id=?", (book_id,)).fetchone()
-        return json.loads(row["data"]) if row else None
+            progress = db.execute("SELECT * FROM progress WHERE book_id=?", (book_id,)).fetchone()
+        if row is None:
+            return None
+        book: dict[str, Any] = json.loads(row["data"])
+        book["progress"] = dict(progress) if progress else None
+        return book
 
     def track(self, track_id: str) -> dict[str, Any] | None:
         with self.connect() as db:
@@ -369,9 +375,10 @@ class Database:
         with self.connect() as db:
             db.execute(
                 """INSERT INTO progress(book_id,track_id,position,updated_at)
-                VALUES(?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(book_id) DO UPDATE SET
+                VALUES(?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                ON CONFLICT(book_id) DO UPDATE SET
                 track_id=excluded.track_id, position=excluded.position,
-                updated_at=CURRENT_TIMESTAMP""",
+                updated_at=excluded.updated_at""",
                 (book_id, track_id, position),
             )
 
@@ -856,17 +863,15 @@ class LibraryScanner:
 
 def create_app(config: WebConfig | None = None, db: Database | None = None) -> FastAPI:
     config = config or WebConfig()
-    if not config.secret:
-        config.secret = "development-only-change-me-set-APP_SECRET_KEY"
     db = db or Database(config.db_path)
     cache = MediaCache(config.cache_path, config.cache_max_bytes)
     cache_warm_slots = threading.BoundedSemaphore(2)
 
     def warm_track(track: dict[str, Any]) -> None:
-        if cache.file(track) is not None:
-            return
         client = httpx.Client(follow_redirects=True)
         try:
+            if cache.file(track) is not None:
+                return
             auth = StoredDriveAuth(db, config.credentials_path)
             url = f"{DRIVE_API}/{track['id']}?alt=media&supportsAllDrives=true"
             fetcher = HttpRangeFetcher.open(
@@ -912,10 +917,15 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
         cache._evict(Path())
     except OSError:
         logger.info("Media cache startup eviction failed", exc_info=True)
-    app = FastAPI(title="RuangDengar")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        config.check()
+        yield
+
+    app = FastAPI(title="RuangDengar", lifespan=lifespan)
     app.add_middleware(
         SessionMiddleware,
-        secret_key=config.secret or "development-only-change-me",
+        secret_key=config.secret or secrets.token_urlsafe(48),
         https_only=config.cookie_secure,
         same_site="lax",
     )
@@ -1091,8 +1101,11 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
         user(request)
 
         async def stream_events() -> Any:
+            # Start at the current event cursor; old completed scans must not
+            # terminate a subscription opened for a newer scan.
+            with scanner.event_lock:
+                last_id = scanner.event_id
             yield f"data: {json.dumps(scanner.db.scan_status() or {'status': 'idle'})}\n\n"
-            last_id = 0
             while not await request.is_disconnected():
                 with scanner.event_lock:
                     pending = [event for event in scanner.events if event["id"] > last_id]
@@ -1450,24 +1463,37 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
             drive_read_ms = 0.0
             drive_reads = 0
             bytes_yielded = 0
-            cached_chunks: list[bytes] = []
             try:
-                reader.seek(start)
-                remaining = length
-                while remaining:
-                    read_started = time.perf_counter()
-                    chunk = reader.read(min(64 * 1024, remaining))
-                    drive_read_ms += (time.perf_counter() - read_started) * 1000
-                    if not chunk:
-                        break
-                    drive_reads += 1
-                    bytes_yielded += len(chunk)
-                    remaining -= len(chunk)
+                # Spool complete-file requests to disk while yielding bounded chunks.
+                # Partial/disconnected streams never publish an incomplete cache entry.
+                with ExitStack() as stack:
+                    spool = None
                     if full_read:
-                        cached_chunks.append(chunk)
-                    yield chunk
-                if full_read and bytes_yielded == size:
-                    cache.put(track, iter(cached_chunks))
+                        try:
+                            spool = stack.enter_context(tempfile.TemporaryFile(dir=cache.path))
+                        except OSError:
+                            logger.info("Cannot spool audio cache track=%s", track_id)
+                    reader.seek(start)
+                    remaining = length
+                    while remaining:
+                        read_started = time.perf_counter()
+                        chunk = reader.read(min(64 * 1024, remaining))
+                        drive_read_ms += (time.perf_counter() - read_started) * 1000
+                        if not chunk:
+                            break
+                        drive_reads += 1
+                        bytes_yielded += len(chunk)
+                        remaining -= len(chunk)
+                        if spool is not None:
+                            try:
+                                spool.write(chunk)
+                            except OSError:
+                                logger.info("Audio cache spool write failed track=%s", track_id)
+                                spool = None
+                        yield chunk
+                    if spool is not None and bytes_yielded == size:
+                        spool.seek(0)
+                        cache.put(track, iter(lambda: spool.read(64 * 1024), b""))
             except FetchError as exc:
                 raise HTTPException(502, f"Drive audio stream failed: {exc}") from exc
             finally:
@@ -1968,6 +1994,7 @@ def main() -> None:
     import uvicorn
 
     config = WebConfig()
+    config.check()
     app = create_app(config)
     uvicorn.run(
         app, host=os.getenv("APP_HOST", "127.0.0.1"), port=int(os.getenv("APP_PORT", "8000"))
