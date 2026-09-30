@@ -1,7 +1,7 @@
 {
-  "name": "audio",
+  "name": "ruangdengar",
   "version": "1.0.0",
-  "description": "`audioscan` reads audio and audiobook metadata from local files, HTTP URLs, and Google Drive. It reports tags, duration, chapters, cover art, and transfer stats. For remote files, it uses HTTP byte ranges so it can read metadata without downloading each full file.",
+  "description": "Private mobile audiobook player streamed from Google Drive.",
   "main": "index.js",
   "directories": {
     "test": "tests"
@@ -12,14 +12,14 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/wongpinter/audioscan.git"
+    "url": "git+https://github.com/wongpinter/ruangdengar.git"
   },
   "keywords": [],
   "type": "module",
   "bugs": {
-    "url": "https://github.com/wongpinter/audioscan/issues"
+    "url": "https://github.com/wongpinter/ruangdengar/issues"
   },
-  "homepage": "https://github.com/wongpinter/audioscan#readme",
+  "homepage": "https://github.com/wongpinter/ruangdengar#readme",
   "dependencies": {
     "lucide-react": "^1.49.0",
     "react": "^19.3.0",

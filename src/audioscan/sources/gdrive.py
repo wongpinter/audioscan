@@ -10,7 +10,7 @@ Credential resolution order:
 1. an explicit ``--credentials`` file (service account, authorised user, or
    OAuth *client secrets*),
 2. ``GOOGLE_APPLICATION_CREDENTIALS``,
-3. a cached token from ``audioscan auth`` (``~/.config/audioscan/token.json``),
+3. a cached token from ``ruangdengar-scan auth`` (``~/.config/audioscan/token.json``),
 4. Application Default Credentials.
 
 ``google-auth`` is an optional dependency, so every import from it is lazy and
@@ -51,7 +51,7 @@ class DriveNotInstalled(DriveError):
 
 
 def config_dir() -> Path:
-    """Directory holding audioscan's cached credentials."""
+    """Directory holding the CLI scanner's cached credentials."""
     base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     return Path(base) / "audioscan"
 
@@ -66,7 +66,7 @@ def _require_google_auth() -> None:
         import google.auth  # noqa: F401
     except ImportError as exc:  # pragma: no cover - depends on environment
         raise DriveNotInstalled(
-            "Google Drive support requires the optional extra: pip install 'audioscan[gdrive]'"
+            "Google Drive support requires the optional extra: pip install 'ruangdengar[gdrive]'"
         ) from exc
 
 
@@ -83,7 +83,7 @@ def _request_adapter() -> Any:
         return Request()
     except ImportError as exc:  # pragma: no cover - depends on optional packages
         raise DriveNotInstalled(
-            "token refresh requires the requests transport; install 'audioscan[gdrive]'"
+            "token refresh requires the requests transport; install 'ruangdengar[gdrive]'"
         ) from exc
 
 
@@ -177,7 +177,7 @@ class DriveAuth:
             credentials, _project = google.auth.default(scopes=list(self._scopes))
         except Exception as exc:
             raise DriveError(
-                "no Google credentials found. Run `audioscan auth --credentials "
+                "no Google credentials found. Run `ruangdengar-scan auth --credentials "
                 "<client_secrets.json>`, or set GOOGLE_APPLICATION_CREDENTIALS, "
                 "or pass --credentials."
             ) from exc
@@ -187,7 +187,7 @@ class DriveAuth:
         if not self._allow_interactive:
             raise DriveError(
                 "interactive sign-in required: run "
-                f"`audioscan auth --credentials {client_secrets}` first"
+                f"`ruangdengar-scan auth --credentials {client_secrets}` first"
             )
         return self.login(client_secrets=client_secrets)
 
@@ -206,7 +206,7 @@ class DriveAuth:
         """Authorisation header for the next Drive request."""
         token = getattr(self.credentials(), "token", None)
         if not token:
-            raise DriveError("credentials have no access token; run `audioscan auth`")
+            raise DriveError("credentials have no access token; run `ruangdengar-scan auth`")
         return {"Authorization": f"Bearer {token}"}
 
     def refresh(self) -> None:
@@ -225,7 +225,7 @@ class DriveAuth:
             from google_auth_oauthlib.flow import InstalledAppFlow
         except ImportError as exc:  # pragma: no cover - depends on environment
             raise DriveNotInstalled(
-                "interactive sign-in needs google-auth-oauthlib: pip install 'audioscan[gdrive]'"
+                "interactive sign-in needs google-auth-oauthlib: pip install 'ruangdengar[gdrive]'"
             ) from exc
 
         secrets_path = (
@@ -273,7 +273,7 @@ class DriveAuth:
     def describe(self) -> dict[str, Any]:
         """Summarise the credential configuration without touching the network.
 
-        Never raises: ``audioscan auth --status`` must be able to report a bad
+        Never raises: ``ruangdengar-scan auth --status`` must be able to report a bad
         configuration rather than crashing on it.
         """
         problem: str | None = None

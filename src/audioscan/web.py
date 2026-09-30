@@ -912,7 +912,7 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
         cache._evict(Path())
     except OSError:
         logger.info("Media cache startup eviction failed", exc_info=True)
-    app = FastAPI(title="Audiobooks")
+    app = FastAPI(title="RuangDengar")
     app.add_middleware(
         SessionMiddleware,
         secret_key=config.secret or "development-only-change-me",
@@ -1583,8 +1583,8 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
     def manifest() -> JSONResponse:
         return JSONResponse(
             {
-                "name": "Audiobooks",
-                "short_name": "Books",
+                "name": "RuangDengar — Private audiobook player",
+                "short_name": "RuangDengar",
                 "start_url": "/",
                 "display": "standalone",
                 "background_color": "#101010",
@@ -1651,9 +1651,9 @@ _INDEX = r"""<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta name="theme-color" content="#101010">
+  <meta name="theme-color" content="#fff8e7">
   <link rel="manifest" href="/manifest.webmanifest">
-  <title>Audiobooks</title>
+  <title>RuangDengar — Private audiobook player</title>
   <style>
     :root {
       color-scheme: dark;

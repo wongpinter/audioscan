@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "audioscan"
+name = "ruangdengar"
 version = "0.1.0"
-description = "Read audio/audiobook tags, chapters and covers without downloading whole files — local, HTTP, or Google Drive."
+description = "Private, mobile-first audiobook player streamed from Google Drive."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -47,11 +47,11 @@ dev = [
 ]
 
 [project.scripts]
-audioscan = "audioscan.cli:main"
-audiobook-web = "audioscan.web:main"
+ruangdengar-scan = "audioscan.cli:main"
+ruangdengar-web = "audioscan.web:main"
 
 [project.urls]
-Homepage = "https://github.com/sugeng/audioscan"
+Homepage = "https://github.com/wongpinter/ruangdengar"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/audioscan"]

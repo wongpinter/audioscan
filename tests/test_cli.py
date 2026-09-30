@@ -394,7 +394,7 @@ def test_module_entry_point_runs() -> None:
         timeout=60,
     )
     assert result.returncode == 0
-    assert "audioscan" in result.stdout
+    assert "ruangdengar-scan" in result.stdout
 
 
 def test_unknown_command_exits_nonzero() -> None:

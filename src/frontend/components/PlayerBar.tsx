@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { LoaderCircle, Pause, Play, SkipBack, SkipForward, Volume2 } from 'lucide-react'
+import { LoaderCircle, Moon, Pause, Play, SkipBack, SkipForward, Volume2 } from 'lucide-react'
 import type { Book, Track } from '../types'
 import { Cover, IconButton } from './ui'
 
@@ -12,6 +12,29 @@ export function PlayerBar({ book, track, start, onNext, onPrevious, onTime, onCh
   const [buffering, setBuffering] = useState(false)
   const [time, setTime] = useState(0)
   const [duration, setDuration] = useState(0)
+  const [sleepMinutes, setSleepMinutes] = useState('off')
+  const [sleepEndsAt, setSleepEndsAt] = useState(0)
+  const [sleepRemaining, setSleepRemaining] = useState(0)
+  const sleepTimer = useRef<number | null>(null)
+  const sleepAtEnd = useRef(false)
+  useEffect(() => () => { if (sleepTimer.current) window.clearTimeout(sleepTimer.current) }, [])
+  useEffect(() => {
+    if (sleepTimer.current) window.clearTimeout(sleepTimer.current)
+    sleepTimer.current = null
+    sleepAtEnd.current = sleepMinutes === 'end'
+    if (sleepMinutes === 'off' || sleepAtEnd.current) { setSleepEndsAt(0); return }
+    const end = Date.now() + Number(sleepMinutes) * 60_000
+    setSleepEndsAt(end)
+    setSleepRemaining(Number(sleepMinutes))
+    sleepTimer.current = window.setTimeout(() => { audio.current?.pause(); setSleepMinutes('off'); setSleepEndsAt(0) }, end - Date.now())
+    return () => { if (sleepTimer.current) window.clearTimeout(sleepTimer.current) }
+  }, [sleepMinutes])
+  useEffect(() => {
+    if (!sleepEndsAt) return
+    const update = () => setSleepRemaining(Math.max(0, Math.ceil((sleepEndsAt - Date.now()) / 60_000)))
+    const interval = window.setInterval(update, 10_000)
+    return () => window.clearInterval(interval)
+  }, [sleepEndsAt])
   const [metrics, setMetrics] = useState({ startupMs: 0, stalls: 0, bufferedAhead: 0, rangeMs: 0, rangeBytes: 0, ranges: 0 })
   const metricsRef = useRef({ requestedAt: 0, startedAt: 0, stalls: 0, rangeMs: 0, rangeBytes: 0, ranges: 0, lastReport: 0, lastSent: 0 })
   useEffect(() => {
@@ -72,12 +95,13 @@ export function PlayerBar({ book, track, start, onNext, onPrevious, onTime, onCh
     }
   }, [track?.id, start])
   return <footer className="player-bar">
-    <audio ref={audio} preload="metadata" onTimeUpdate={event => { const player = event.currentTarget; const value = player.currentTime; setTime(value); onTime(value); const ahead = player.buffered.length ? Math.max(0, player.buffered.end(player.buffered.length - 1) - value) : 0; setMetrics(current => ({ ...current, bufferedAhead: Math.round(ahead) })) }} onDurationChange={event => setDuration(event.currentTarget.duration || 0)} onEnded={event => { onCheckpoint(event.currentTarget.currentTime); onNext() }} onPause={event => { onCheckpoint(event.currentTarget.currentTime); setPlaying(false) }} onPlay={() => setPlaying(true)} />
+    <audio ref={audio} preload="metadata" onTimeUpdate={event => { const player = event.currentTarget; const value = player.currentTime; setTime(value); onTime(value); const ahead = player.buffered.length ? Math.max(0, player.buffered.end(player.buffered.length - 1) - value) : 0; setMetrics(current => ({ ...current, bufferedAhead: Math.round(ahead) })) }} onDurationChange={event => setDuration(event.currentTarget.duration || 0)} onEnded={event => { onCheckpoint(event.currentTarget.currentTime); if (sleepAtEnd.current) { sleepAtEnd.current = false; setSleepMinutes('off'); setSleepEndsAt(0) } else onNext() }} onPause={event => { onCheckpoint(event.currentTarget.currentTime); setPlaying(false) }} onPlay={() => setPlaying(true)} />
     {playError && <button className="play-retry" onClick={() => { const player = audio.current; if (!player) return; const position = player.currentTime || start; player.src = `/api/tracks/${encodeURIComponent(track?.id ?? '')}/audio`; player.load(); player.addEventListener('loadedmetadata', () => { player.currentTime = position; void player.play().then(() => setPlayError(false)).catch(() => setPlayError(true)) }, { once: true }) }}>Retry audio</button>}
     {import.meta.env.DEV && <output className="playback-metrics">Start {metrics.startupMs} ms · stalls {metrics.stalls} · buffer {metrics.bufferedAhead}s · Drive {metrics.rangeMs} ms / {metrics.ranges} ranges / {metrics.rangeBytes} B</output>}
     <div className="player-track">{book?.cover && <Cover src={book.cover} alt="" />}
       <div className="player-label"><strong>{track?.title ?? 'Choose a book'}</strong><span>{buffering ? 'Buffering audio…' : book?.title ?? 'Audiobooks'}</span></div>
     </div>
+    <label className="sleep-timer"><Moon size={16} /><select aria-label="Sleep timer" value={sleepMinutes} onChange={event => setSleepMinutes(event.target.value)}><option value="off">Timer off</option><option value="15">15 min</option><option value="30">30 min</option><option value="45">45 min</option><option value="60">60 min</option><option value="end">End of track</option></select>{sleepEndsAt > 0 && <output aria-live="polite">{sleepRemaining}m</output>}</label>
     <div className="player-controls">
       <IconButton aria-label="Previous track" onClick={onPrevious}><SkipBack size={18} /></IconButton>
       <IconButton aria-label={buffering ? 'Buffering audio' : playing ? 'Pause' : 'Play'} className="play-toggle" disabled={!track || buffering} onClick={() => { const p = audio.current; if (p?.paused) void p.play(); else p?.pause() }}>{buffering ? <LoaderCircle className="spin" size={18} /> : playing ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}</IconButton>

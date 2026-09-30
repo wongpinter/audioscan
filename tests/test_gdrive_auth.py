@@ -148,7 +148,7 @@ def test_missing_credentials_produce_an_actionable_error(
     with pytest.raises(DriveError) as excinfo:
         auth.headers()
     message = str(excinfo.value)
-    assert "audioscan auth" in message
+    assert "ruangdengar-scan auth" in message
     assert "GOOGLE_APPLICATION_CREDENTIALS" in message
 
 

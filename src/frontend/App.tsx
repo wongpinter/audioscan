@@ -42,7 +42,7 @@ function App() {
       const result = await api<Book[]>('/api/library')
       setBooks(result)
       let pending: { bookId: string; trackId: string; position: number } | null = null
-      try { pending = JSON.parse(localStorage.getItem('audioscan.pending-progress') || 'null') } catch { /* storage can be disabled */ }
+      try { pending = JSON.parse(localStorage.getItem('ruangdengar.pending-progress') || 'null') } catch { /* storage can be disabled */ }
       const recover = pending && result.find(book => book.id === pending?.bookId && book.tracks.some(track => track.id === pending?.trackId))
       setResumeBook(current => current ?? recover ?? result.find(book => (book.progress?.position ?? 0) > 0 && book.tracks.some(track => track.id === book.progress?.track_id)) ?? null)
       result.filter(book => (book.progress?.position ?? 0) > 0).slice(0, 3).forEach(book => { const track = book.tracks.find(item => item.id === book.progress?.track_id); if (track) void fetch(`/api/tracks/${encodeURIComponent(track.id)}/warm`, { method: 'POST', credentials: 'same-origin' }).catch(() => {}) })
@@ -139,12 +139,12 @@ function App() {
     if (!activeBook || !activeTrack || time <= 0) return
     const checkpoint = { bookId: activeBook.id, trackId: activeTrack.id, position: Math.floor(time) }
     progressState.current.latest = checkpoint
-    try { localStorage.setItem('audioscan.pending-progress', JSON.stringify(checkpoint)) } catch { /* storage can be disabled */ }
+    try { localStorage.setItem('ruangdengar.pending-progress', JSON.stringify(checkpoint)) } catch { /* storage can be disabled */ }
     if (!force && Date.now() - progressState.current.lastSentAt < 15_000) return
     progressState.current.lastSentAt = Date.now()
     void fetch(`/api/progress/${encodeURIComponent(checkpoint.bookId)}`, { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ track_id: checkpoint.trackId, position: checkpoint.position }) }).then(response => {
       if (!response.ok) throw new Error(`Progress save failed: ${response.status}`)
-      if (progressState.current.latest === checkpoint) { try { localStorage.removeItem('audioscan.pending-progress') } catch { /* storage can be disabled */ } }
+      if (progressState.current.latest === checkpoint) { try { localStorage.removeItem('ruangdengar.pending-progress') } catch { /* storage can be disabled */ } }
     }).catch(() => {})
   }, [activeBook, activeTrack])
   useEffect(() => {
@@ -157,9 +157,9 @@ function App() {
     }
     const retry = () => {
       let pending: { bookId: string; trackId: string; position: number } | null = null
-      try { pending = JSON.parse(localStorage.getItem('audioscan.pending-progress') || 'null') } catch { return }
+      try { pending = JSON.parse(localStorage.getItem('ruangdengar.pending-progress') || 'null') } catch { return }
       if (!pending) return
-      void fetch(`/api/progress/${encodeURIComponent(pending.bookId)}`, { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ track_id: pending.trackId, position: pending.position }) }).then(response => { if (response.ok) localStorage.removeItem('audioscan.pending-progress') }).catch(() => {})
+      void fetch(`/api/progress/${encodeURIComponent(pending.bookId)}`, { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ track_id: pending.trackId, position: pending.position }) }).then(response => { if (response.ok) localStorage.removeItem('ruangdengar.pending-progress') }).catch(() => {})
     }
     window.addEventListener('pagehide', flush)
     window.addEventListener('online', retry)
@@ -173,7 +173,7 @@ function App() {
   const groupLink = (mode: 'artist' | 'directory' | 'album', name: string) => navigate(`/group/${mode}?name=${encodeURIComponent(name)}`)
   return <div className="app-shell">
     <header className="app-header">
-      <Link className="brand" to="/"><span className="brand-mark"><Headphones size={19} /></span><span>audio<span className="brand-accent">scan</span></span></Link>
+      <Link className="brand" to="/"><span className="brand-mark"><Headphones size={19} /></span><span>Ruang<span className="brand-accent">Dengar</span></span></Link>
       <nav className="desktop-nav" aria-label="Main navigation"><Link to="/">Home</Link><Link to="/search">Search</Link><Link to="/library">Library</Link></nav>
       <div className="header-actions"><Button className="scan-action" disabled={scan?.status === 'running'} onClick={() => void refreshLibrary()}>{scan?.status === 'running' ? 'Scanning…' : 'Scan Drive'}</Button><Link className="settings-link" to="/settings" aria-label="Settings"><Settings2 size={19} /></Link></div>
     </header>

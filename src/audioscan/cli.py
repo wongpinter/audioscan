@@ -1,4 +1,4 @@
-"""Command line interface: ``audioscan scan|inspect|auth``."""
+"""Command line interface: ``ruangdengar-scan scan|inspect|auth``."""
 
 from __future__ import annotations
 
@@ -68,13 +68,13 @@ _COVER_EXTENSIONS = {
 
 EXAMPLES = """\
 examples:
-  audioscan scan ~/Audiobooks
-  audioscan scan ~/Books --group --json report.json
-  audioscan scan 'gdrive://1AbCdEfFolderId' --stats
-  audioscan scan --drive-query "name contains 'Potter'" gdrive: --csv potter.csv
-  audioscan inspect "Chapter 31; The Battle of Hogwarts.mp3"
-  audioscan inspect 'gdrive://file/1XyZ...' --cover-out cover.jpg
-  audioscan auth --credentials ~/client_secrets.json
+  ruangdengar-scan scan ~/Audiobooks
+  ruangdengar-scan scan ~/Books --group --json report.json
+  ruangdengar-scan scan 'gdrive://1AbCdEfFolderId' --stats
+  ruangdengar-scan scan --drive-query "name contains 'Potter'" gdrive: --csv potter.csv
+  ruangdengar-scan inspect "Chapter 31; The Battle of Hogwarts.mp3"
+  ruangdengar-scan inspect 'gdrive://file/1XyZ...' --cover-out cover.jpg
+  ruangdengar-scan auth --credentials ~/client_secrets.json
 """
 
 
@@ -105,17 +105,17 @@ class CoverSink:
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argument parser."""
     parser = argparse.ArgumentParser(
-        prog="audioscan",
+        prog="ruangdengar-scan",
         description=(
             "Read tags, chapters and cover art from audio files — including remote "
             "ones — without downloading whole files. Audio metadata lives in a few "
-            "kilobytes at the start (and sometimes the end) of a file, so audioscan "
+            "kilobytes at the start (and sometimes the end) of a file, so RuangDengar Scan "
             "serves mutagen only the byte ranges it asks for."
         ),
         epilog=EXAMPLES,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--version", action="version", version=f"audioscan {__version__}")
+    parser.add_argument("--version", action="version", version=f"ruangdengar-scan {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     scan = subparsers.add_parser(
@@ -483,7 +483,7 @@ def _stats_table(tracks: Sequence[TrackMeta]) -> Table:
 # commands
 # --------------------------------------------------------------------------- #
 def cmd_scan(args: argparse.Namespace) -> int:
-    """Run ``audioscan scan``."""
+    """Run ``ruangdengar-scan scan``."""
     if not args.targets:
         raise CliError("scan needs at least one TARGET (a path, https URL, or gdrive:)")
 
@@ -541,7 +541,7 @@ def _exit_code(tracks: Sequence[TrackMeta]) -> int:
 
 
 def cmd_inspect(args: argparse.Namespace) -> int:
-    """Run ``audioscan inspect``."""
+    """Run ``ruangdengar-scan inspect``."""
     options = _source_options(args)
     sources = build_sources([args.target], options)
     try:
@@ -598,7 +598,7 @@ def _read_cover(source: Source, item: RemoteFile, index: int) -> tuple[bytes, st
 
 
 def cmd_auth(args: argparse.Namespace) -> int:
-    """Run ``audioscan auth``."""
+    """Run ``ruangdengar-scan auth``."""
     auth = DriveAuth(
         credentials_path=args.credentials,
         token_path=args.token,
@@ -612,8 +612,8 @@ def cmd_auth(args: argparse.Namespace) -> int:
         _print_auth_status(auth.describe())
         if not args.status and not args.credentials:
             console.print(
-                "\nTo sign in:  audioscan auth --credentials <client_secrets.json>\n"
-                "Or use a service account:  audioscan scan --credentials sa.json gdrive://<folder-id>"
+                "\nTo sign in:  ruangdengar-scan auth --credentials <client_secrets.json>\n"
+                "Or use a service account:  ruangdengar-scan scan --credentials sa.json gdrive://<folder-id>"
             )
         return EXIT_OK
 

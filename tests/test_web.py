@@ -195,6 +195,7 @@ def test_library_features_favorites_ratings_tags_playlists_history_storage(tmp_p
     assert client.post("/api/history/book-key", json={"track_id": "drive-track"}).status_code == 204
     assert client.get("/api/features").json()["playlists"][0]["book_ids"] == ["book-key"]
     book = client.get("/api/library").json()[0]
+    assert client.get("/manifest.webmanifest").json()["short_name"] == "RuangDengar"
     assert (
         book["favorite"] is True and book["rating"] == 5 and book["tags"] == ["Classic", "Sci-fi"]
     )

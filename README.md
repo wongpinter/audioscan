@@ -1,221 +1,69 @@
-# audioscan
+# RuangDengar
 
-`audioscan` reads audio and audiobook metadata from local files, HTTP URLs, and Google Drive. It reports tags, duration, chapters, cover art, and transfer stats. For remote files, it uses HTTP byte ranges so it can read metadata without downloading each full file.
+RuangDengar plays your audiobooks straight from Google Drive. Just connect your Drive, pick a folder, and listen. Private server cache, sleep timer. Your books never leave your Drive.
 
-## Install
+RuangDengar is a private, mobile-first audiobook player. It streams audio from your configured Drive folder and syncs playback progress and library details across your devices.
 
-Requires Python 3.11 or newer.
+## Listen with RuangDengar
 
-Install from this source checkout with `uv`:
+- Connect one Google account and choose the audiobook folder for your library.
+- Stream tracks and chapters from Drive with byte-range requests.
+- Resume listening across devices with saved progress.
+- Browse by artist, album, or folder. Search, sort, and filter your books.
+- Save favorites, ratings, tags, playlists, and listening history.
+- Install RuangDengar from its HTTPS site on your phone.
+- Keep recently played books in a private, size-limited server cache. Cache misses stream from Drive.
+- Set a sleep timer for 15, 30, 45, or 60 minutes, or stop at the end of the current track.
 
-```bash
-uv sync --extra gdrive
-uv run audioscan --help
-```
+## Set up the player
 
-Install with `pip`:
+RuangDengar needs Python 3.11+, Node.js, a Google OAuth **Web application** client, and a Drive folder with your audiobooks.
 
-```bash
-python -m pip install ".[gdrive]"
-audioscan --help
-```
-
-The `gdrive` extra installs Google authentication support. For local files and HTTP URLs, install without the extra:
-
-```bash
-python -m pip install .
-```
-
-## Quick start
-
-Scan a local folder:
-
-```bash
-audioscan scan ~/Audiobooks
-```
-
-Group tracks into likely books and report missing or duplicate chapter numbers:
-
-```bash
-audioscan scan ~/Audiobooks --group
-```
-
-Save JSON and CSV reports:
-
-```bash
-audioscan scan ~/Audiobooks --json report.json --csv report.csv
-```
-
-Scan a single remote file and show transfer statistics:
-
-```bash
-audioscan scan https://example.org/book.m4b --stats
-```
-
-Inspect one file's tags, chapters, and covers:
-
-```bash
-audioscan inspect "Chapter 31; The Battle of Hogwarts.mp3"
-```
-
-Extract covers while scanning:
-
-```bash
-audioscan scan ~/Audiobooks --extract-covers covers/
-```
-
-Write one file's cover art:
-
-```bash
-audioscan inspect book.m4b --cover-out cover.jpg
-```
-
-Run `audioscan --help`, `audioscan scan --help`, or `audioscan inspect --help` for all options.
-
-## Targets
-
-`scan` accepts one or more targets:
-
-| Target | What it scans |
-| --- | --- |
-| `~/Audiobooks` | A local folder, recursively by default |
-| `~/Audiobooks/book.m4b` | One local audio file |
-| `https://host/book.m4b` | One HTTP or HTTPS file |
-| `gdrive:` | Audio files in Google Drive |
-| `gdrive://FOLDER_ID` | Files in one Drive folder, recursively by default |
-| `gdrive://file/FILE_ID` | One Drive file |
-
-Local scans recognize `.aac`, `.aif`, `.aiff`, `.ape`, `.dff`, `.dsf`, `.flac`, `.m4a`, `.m4b`, `.m4p`, `.mka`, `.mp2`, `.mp3`, `.mp4`, `.mpc`, `.oga`, `.ogg`, `.opus`, `.spx`, `.tta`, `.wav`, `.wave`, and `.wma`. Set a custom list with `--extensions`, for example `--extensions mp3,m4b,flac`.
-
-Files with partial-download suffixes such as `.part` or `.crdownload` appear in scan results and are marked as partial. A partial audio file can fail to parse because its download stopped before the audio container finished.
-
-## Google Drive
-
-Install the `gdrive` extra first. For browser-based OAuth, create an OAuth client of type **Desktop app**, download its client secrets JSON, then run:
-
-```bash
-audioscan auth --credentials ~/client_secrets.json
-audioscan auth --status
-audioscan scan 'gdrive://FOLDER_ID' --group --stats
-```
-
-The OAuth flow saves a token under `~/.config/audioscan/token.json` by default. If no browser is available, `audioscan` prints a sign-in URL. Open it in a browser that can connect to the machine running `audioscan`, because Google sends the sign-in result to that machine's temporary callback server. Use `--token PATH` to select another token location. Remove the cached token with:
-
-```bash
-audioscan auth --logout
-```
-
-For unattended scans, use a service account with read access to the target files:
-
-```bash
-export GOOGLE_APPLICATION_CREDENTIALS="$HOME/drive-reader.json"
-audioscan scan 'gdrive://FOLDER_ID' --stats
-```
-
-You can also pass credentials per command with `--credentials PATH`. Keep credential and token files private. `audioscan` requests read-only Drive access.
-
-To add a Drive search clause:
-
-```bash
-audioscan scan gdrive: --drive-query "name contains 'Potter'" --json potter.json
-```
-
-## Reports and options
-
-`scan` prints a terminal table by default. Use `--json PATH` or `--csv PATH` to save reports. Use `-` as the path to write a report to standard output:
-
-```bash
-audioscan scan ~/Audiobooks --json - > report.json
-audioscan scan ~/Audiobooks --csv - > report.csv
-```
-
-Use `--no-table` to suppress the terminal tables. Progress and status messages go to standard error, so standard output stays suitable for JSON or CSV.
-
-Useful `scan` options:
-
-| Option | Purpose |
-| --- | --- |
-| `--group` | Group tracks by book and show chapter gaps or duplicates |
-| `--only-errors` | Show only tracks that failed to parse |
-| `--min-duration SECONDS` | Skip shorter tracks |
-| `--limit N` | Scan at most N files |
-| `--workers N` | Set parallel probes; default is 8 |
-| `--stats` | Show bytes fetched and cache statistics |
-| `--extract-covers DIR` | Save cover images from scanned files |
-| `--cover-index N` | Save only cover N from each file; default saves all covers |
-| `--no-recursive` | Scan only the target folder's direct files |
-| `--block-size KiB` | Set remote-reader cache block size; default is 256 KiB |
-| `--max-fetch-mb MB` | Cap remote bytes read per file; default is 64 MB; `0` removes the cap |
-| `--timeout SECONDS` | Set the HTTP timeout |
-| `--retries N` | Set retry count for transient HTTP and Drive errors |
-| `--header NAME:VALUE` | Add an HTTP header; repeat this option for more headers |
-
-`inspect` accepts `--json PATH`, `--cover-out PATH`, and `--stats`. `auth` accepts `--credentials PATH`, `--token PATH`, `--status`, and `--logout`.
-
-JSON reports contain `generated_at`, aggregate `totals`, and a `tracks` list. The totals include track count, total file size, fetched bytes, duration, chapter count, cover count, and error count. `--group` also adds a `groups` list. CSV contains one summary row per track.
-
-Exit codes: `0` means all scanned files succeeded, `1` means at least one file failed, and `2` means a command or configuration error occurred.
-
-## Remote reads and limits
-
-`audioscan` uses a seekable reader with a bounded block cache. It can read file metadata stored near the start or end, including M4B files whose MP4 `moov` atom sits at the end. `--stats` shows the bytes fetched for remote files.
-
-HTTP servers must support byte-range requests when a file needs seeks beyond the first cache block. A file that fits in one block can still be scanned with a server that ignores ranges. The remote-read budget prevents a metadata probe from downloading an unexpectedly large amount of data; set `--max-fetch-mb 0` only when you accept unlimited reads.
-
-An `.m4b` or `.m4a` file that reports a missing MP4 `ftyp` signature may be incomplete or damaged. `audioscan` reports the first header bytes to help diagnose this case. It does not repair the file. Keep the original and test any repair on a separate copy.
-
-Chapter support includes ID3 `CHAP`/`CTOC`, MP4 `chpl`, and Vorbis chapter comments. QuickTime chapter tracks are not parsed. Google Docs and other non-audio Drive files are skipped. The app reads files only; it does not edit audio or Drive content.
-
-## Python API
-
-```python
-from audioscan import probe
-from audioscan.reader import SeekableBlockReader
-from audioscan.sources.http import HttpRangeFetcher
-
-reader = SeekableBlockReader(HttpRangeFetcher.open("https://example.org/book.m4b"))
-try:
-    track = probe(reader, name="book.m4b", source="http")
-    print(track.title, track.duration, len(track.chapters))
-    print(reader.stats.snapshot())
-finally:
-    reader.close()
-```
-
-## Private audiobook web app
-
-The repository also includes a mobile-first audiobook PWA. It streams audio from Google Drive with byte ranges, keeps Google credentials on the server, and stores playback and library tools in SQLite.
-
-Set these server environment variables before start:
+1. Enable the Google Drive API and create a Web application OAuth client. Add `https://YOUR_HOST/auth/callback` as its authorized redirect URI.
+2. Set these server environment values:
 
 ```sh
 APP_ALLOWED_EMAIL=you@example.com
-APP_SECRET_KEY=<random secret with at least 32 characters>
-# Generate with: openssl rand -hex 32
-APP_BASE_URL=https://books.example.com
+APP_SECRET_KEY=<at least 32 random characters>
+APP_BASE_URL=https://YOUR_HOST
 GOOGLE_CLIENT_SECRETS=/run/secrets/google-oauth-web.json
 AUDIOBOOKS_FOLDER_ID=<Drive folder ID>
-APP_DB_PATH=data/audiobooks.sqlite3
+APP_DB_PATH=data/ruangdengar.sqlite3
 APP_CACHE_PATH=data/media-cache
 APP_CACHE_MAX_BYTES=32212254720
 APP_CACHE_WARM_ENABLED=true
 ```
 
-Create a Google OAuth **Web application** client. Add `APP_BASE_URL/auth/callback` as its authorized redirect URI. Enable Drive API, then start the app with `uv run audiobook-web`. Put it behind an HTTPS reverse proxy and allow only the server to read the SQLite and OAuth files. Open the URL on the phone and add it to the home screen.
+Generate the secret with `openssl rand -hex 32`. Keep OAuth credentials, database, and cache private to the server.
 
-The web app supports Google sign-in for one configured email, background Drive scans with progress, lazy chapter browsing, and authenticated range-proxied playback. Playback progress checkpoints every 15 seconds, retries from browser storage after reconnect, and offers resume after refresh. A private local cache defaults to a 30 GiB LRU cap. Cached files use Google Drive MD5 checksums and atomic writes; cold cache misses keep streaming from Drive. Set `APP_CACHE_WARM_ENABLED=false` to disable background warming. The app cache directory is private to the app process; Caddy does not share its volume, so cached bytes still pass through Python. SQLite syncs saved position, favorites, ratings, tags, playlists, recent listening history, and excluded Drive folders across devices. Library tools include search, status/favorite/tag/playlist filters, sorting, Continue Listening, storage summaries, chapter selection, a Browse by switch for artist/directory/album with nested group pages, and a Settings page to exclude scanned directories. The list comes from indexed media paths and does not call Drive, avoiding Drive query quota use. Saving exclusions immediately removes matching tracks and associated progress, favorites, ratings, tags, and playlist entries from SQLite. New scans skip those path prefixes. Feature tables persist across library rescans. The deployment settings above remain user-specific and are not committed.
+3. Build and start RuangDengar:
+
+```sh
+npm ci
+npm run build
+uv sync --extra web
+uv run ruangdengar-web
+```
+
+Run the service behind an HTTPS reverse proxy. Open its URL on your phone and choose **Add to Home Screen**.
+
+RuangDengar allows the configured Google email and scans only the configured Drive folder. It uses Drive's read-only access. The server cache stores copies of fully warmed or fully requested audio files, up to its configured limit. Google Drive remains the source library; cache files stay on the app server. Cache hits still pass through the app server.
+
+See [Deployment](docs/DEPLOYMENT.md) for service setup. For standalone library metadata scans, see [Google Drive CLI scanning](docs/CLI.md).
 
 ## Development
 
-The web UI uses React, TypeScript, Vite, Tailwind CSS, and local shadcn-style components. Build the frontend before packaging or starting the web app. `uv build` packages the generated files from `src/audioscan/static`:
-
-```bash
+```sh
+uv sync --extra dev --extra gdrive --extra web
 npm ci
 npm run build
-uv sync --extra dev --extra gdrive --extra web
 uv run pytest
 uv run ruff check .
 uv run mypy src
 ```
 
-Vite writes production assets to `src/audioscan/static`, which FastAPI serves at `/static/`. During UI work, run `npm run dev` and the backend on `127.0.0.1:8111`.
+The web frontend uses React and Vite. Its production assets live in `src/audioscan/static/`.
+
+## License
+
+MIT
