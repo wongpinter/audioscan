@@ -15,6 +15,7 @@ export type Book = {
   id: string
   title: string
   artist?: string | null
+  album_artist?: string | null
   album?: string | null
   directory?: string | null
   cover?: string | null

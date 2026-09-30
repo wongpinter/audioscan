@@ -846,7 +846,8 @@ class LibraryScanner:
                 {
                     "id": group.key,
                     "title": group.title,
-                    "artist": first.albumartist or first.artist,
+                    "artist": first.artist,
+                    "album_artist": first.albumartist,
                     "album": first.album or group.title,
                     "directory": members[0]["path"].rsplit("/", 1)[0]
                     if "/" in members[0]["path"]

@@ -391,6 +391,8 @@ def test_scan_commit_restores_nested_metadata_types(tmp_path: Path) -> None:
             "name": "track.mp3",
             "path": "Book/track.mp3",
             "album": "Book",
+            "artist": "Narrator",
+            "albumartist": "Collection Author",
             "covers": [Cover(index=0, mime="image/jpeg").to_dict()],
             "chapters": [Chapter(number=1, start=0, title="Start").to_dict()],
         },
@@ -399,6 +401,8 @@ def test_scan_commit_restores_nested_metadata_types(tmp_path: Path) -> None:
     book = db.book(db.library()[0]["id"])
     assert book is not None
     assert book["tracks"][0]["title"] == "track.mp3"
+    assert book["artist"] == "Narrator"
+    assert book["album_artist"] == "Collection Author"
 
 
 def test_scan_status_partial_update_keeps_required_status(tmp_path: Path) -> None:
