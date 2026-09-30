@@ -56,6 +56,7 @@ See [Deployment](docs/DEPLOYMENT.md) for service setup. For standalone library m
 ```sh
 uv sync --extra dev --extra gdrive --extra web
 npm ci
+npm test
 npm run build
 uv run pytest
 uv run ruff check .

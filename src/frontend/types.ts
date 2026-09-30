@@ -10,7 +10,7 @@ export type Track = {
   chapter_count?: number
   format?: string
 }
-export type Progress = { track_id: string; position: number }
+export type Progress = { track_id: string; position: number; updated_at?: string }
 export type Book = {
   id: string
   title: string

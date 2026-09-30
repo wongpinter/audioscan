@@ -3,7 +3,8 @@ import { Link, Route, Routes, useLocation, useNavigate, useParams, useSearchPara
 import { ArrowLeft, BookOpen, CheckCircle2, Clock3, Headphones, Library, LoaderCircle, Search, Settings2, SlidersHorizontal, Heart, Star, Plus } from 'lucide-react'
 import { Avatar, Button, Card, Cover, Input, PlayIcon, Progress, Skeleton } from './components/ui'
 import { PlayerBar } from './components/PlayerBar'
-import type { Book, Chapter, Track } from './types'
+import type { Book, Chapter, Progress as ListeningProgress, Track } from './types'
+import { resumeTrack, listeningStatus, newerCheckpoint, persistCheckpoint, type Checkpoint } from './listening'
 
 type ScanStatus = { status: string; total: number; processed: number; current: string; error: string }
 type Features = { favorites: string[]; ratings: Record<string, number>; tags: Record<string, string[]>; playlists: { id: string; name: string; book_ids: string[] }[]; history: { book_id: string; track_id: string; position: number; played_at: string }[] }
@@ -36,7 +37,7 @@ function App() {
   const [autoPlay, setAutoPlay] = useState(false)
   const [resumeBook, setResumeBook] = useState<Book | null>(null)
   const navigate = useNavigate()
-  const progressState = useRef({ lastSentAt: 0, latest: null as { bookId: string; trackId: string; position: number } | null })
+  const progressState = useRef({ lastSentAt: 0, latest: null as Checkpoint | null })
   const prefetchedTracks = useRef(new Set<string>())
   const currentListen = useRef<{ bookId: string; trackId: string } | null>(null)
 
@@ -44,18 +45,19 @@ function App() {
     try {
       const [result, recent] = await Promise.all([api<Book[]>('/api/library'), api<Features>('/api/features')])
       setBooks(result)
+      void api<ScanStatus>('/api/library/scan').then(setScan).catch(() => {})
       const lastPlayed = recent.history[0]?.book_id
-      let saved: { bookId: string; trackId: string; position: number } | null = null
+      let saved: Checkpoint | null = null
       try { saved = JSON.parse(localStorage.getItem('ruangdengar.last-listening') || 'null') } catch { /* storage can be disabled */ }
       const savedBook = saved && result.find(item => item.id === saved?.bookId && item.tracks.some(track => track.id === saved?.trackId))
-      let pending: { bookId: string; trackId: string; position: number } | null = null
+      let pending: Checkpoint | null = null
       try { pending = JSON.parse(localStorage.getItem('ruangdengar.pending-progress') || 'null') } catch { /* storage can be disabled */ }
       const latestBook = result.find(item => item.id === lastPlayed)
       const book = latestBook || savedBook
-      const savedMatchesLatest = !!(savedBook && book?.id === savedBook.id)
-      const pendingMatchesSaved = !!(saved && pending?.bookId === saved.bookId && pending.trackId === saved.trackId)
-      const recovery = savedMatchesLatest
-        ? { ...savedBook!, progress: { track_id: saved!.trackId, position: pendingMatchesSaved ? pending!.position : saved!.position } }
+      const candidates = book ? [newerCheckpoint(book, pending), newerCheckpoint(book, saved)].filter((item): item is Checkpoint => !!item) : []
+      const local = candidates.sort((a, b) => b.savedAt - a.savedAt)[0]
+      const recovery = local && book
+        ? { ...book, progress: { track_id: local.trackId, position: local.position } }
         : book?.progress?.track_id ? book : null
       setResumeBook(recovery || null)
       result.filter(book => (book.progress?.position ?? 0) > 0).slice(0, 3).forEach(book => { const track = book.tracks.find(item => item.id === book.progress?.track_id); if (track) void fetch(`/api/tracks/${encodeURIComponent(track.id)}/warm`, { method: 'POST', credentials: 'same-origin' }).catch(() => {}) })
@@ -75,13 +77,14 @@ function App() {
       setScan(previous => ({ status: 'running', total: previous?.total ?? 0, processed: previous?.processed ?? 0, current: 'Connecting to Google Drive', error: '' }))
     } catch (e) { setError(e instanceof Error ? e.message : 'Could not start library scan.') }
   }, [])
+  const scanRunning = scan?.status === 'running'
   useEffect(() => {
     let events: EventSource | null = null
     let disposed = false
     void api<ScanStatus>('/api/library/scan').then(status => {
       if (disposed) return
       setScan(status)
-      if (status.status === 'running') {
+      if (scanRunning || status.status === 'running') {
         events = new EventSource('/api/library/events')
         events.onmessage = event => {
           const next = JSON.parse(event.data) as ScanStatus
@@ -92,18 +95,13 @@ function App() {
       }
     }).catch(() => {})
     return () => { disposed = true; events?.close() }
-  }, [load])
+  }, [load, scanRunning])
   const filtered = useMemo(() => books
     .filter(book => !favoritesOnly || features.favorites.includes(book.id))
     .filter(book => !playlistView || features.playlists.find(item => item.id === playlistView)?.book_ids.includes(book.id))
     .filter(book => `${book.title} ${book.artist ?? ''} ${(features.tags[book.id] ?? []).join(' ')}`.toLowerCase().includes(filter.trim().toLowerCase()))
     .filter(book => {
-      const progress = book.progress?.position ?? 0
-      const currentTrack = book.tracks.find(track => track.id === book.progress?.track_id)
-      const ratio = currentTrack?.duration ? progress / currentTrack.duration : 0
-      if (statusFilter === 'in-progress') return progress > 0 && ratio < 0.95
-      if (statusFilter === 'not-started') return progress <= 0
-      if (statusFilter === 'completed') return ratio >= 0.95
+      if (statusFilter !== 'all') return listeningStatus(book) === statusFilter
       return true
     })
     .sort((a, b) => {
@@ -117,7 +115,7 @@ function App() {
   [books, filter, statusFilter, sortBy, sortDirection, features, favoritesOnly, playlistView])
   const play = (book: Book, track: Track, start = 0) => {
     currentListen.current = { bookId: book.id, trackId: track.id }
-    try { localStorage.setItem('ruangdengar.last-listening', JSON.stringify({ bookId: book.id, trackId: track.id, position: start })) } catch { /* storage can be disabled */ }
+    try { localStorage.setItem('ruangdengar.last-listening', JSON.stringify({ bookId: book.id, trackId: track.id, position: start, savedAt: Date.now() })) } catch { /* storage can be disabled */ }
     setResumeBook(null)
     setAutoPlay(true)
     void fetch(`/api/history/${encodeURIComponent(book.id)}`, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ track_id: track.id }) })
@@ -167,8 +165,8 @@ function App() {
         void fetch(`/api/tracks/${encodeURIComponent(next.id)}/warm`, { method: 'POST', credentials: 'same-origin' }).catch(() => {})
       }
     }
-    if (!activeBook || !activeTrack || time <= 0) return
-    const checkpoint = { bookId: activeBook.id, trackId: activeTrack.id, position: Math.floor(time) }
+    if (!activeBook || !activeTrack || !Number.isFinite(time) || time < 0) return
+    const checkpoint = { bookId: activeBook.id, trackId: activeTrack.id, position: Math.floor(time), savedAt: Date.now() }
     if (currentListen.current?.bookId === checkpoint.bookId && currentListen.current.trackId === checkpoint.trackId) {
       try { localStorage.setItem('ruangdengar.last-listening', JSON.stringify(checkpoint)) } catch { /* storage can be disabled */ }
     }
@@ -176,7 +174,8 @@ function App() {
     try { localStorage.setItem('ruangdengar.pending-progress', JSON.stringify(checkpoint)) } catch { /* storage can be disabled */ }
     if (!force && Date.now() - progressState.current.lastSentAt < 15_000) return
     progressState.current.lastSentAt = Date.now()
-    void fetch(`/api/progress/${encodeURIComponent(checkpoint.bookId)}`, { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ track_id: checkpoint.trackId, position: checkpoint.position }) }).then(response => {
+    setBooks(previous => previous.map(book => book.id === checkpoint.bookId ? { ...book, progress: { track_id: checkpoint.trackId, position: checkpoint.position, updated_at: new Date(checkpoint.savedAt).toISOString() } } : book))
+    void persistCheckpoint(checkpoint).then(response => {
       if (!response.ok) throw new Error(`Progress save failed: ${response.status}`)
       if (progressState.current.latest === checkpoint) { try { localStorage.removeItem('ruangdengar.pending-progress') } catch { /* storage can be disabled */ } }
     }).catch(() => {})
@@ -185,15 +184,22 @@ function App() {
     const flush = () => {
       const checkpoint = progressState.current.latest
       if (!checkpoint) return
-      const body = JSON.stringify({ track_id: checkpoint.trackId, position: checkpoint.position })
-      if (navigator.sendBeacon?.(`/api/progress/${encodeURIComponent(checkpoint.bookId)}`, new Blob([body], { type: 'application/json' }))) return
-      void fetch(`/api/progress/${encodeURIComponent(checkpoint.bookId)}`, { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body, keepalive: true }).catch(() => {})
+      void persistCheckpoint(checkpoint, true).catch(() => {})
     }
     const retry = () => {
-      let pending: { bookId: string; trackId: string; position: number } | null = null
-      try { pending = JSON.parse(localStorage.getItem('ruangdengar.pending-progress') || 'null') } catch { return }
+      let stored: string | null
+      let pending: Checkpoint | null = null
+      try { stored = localStorage.getItem('ruangdengar.pending-progress'); pending = JSON.parse(stored || 'null') } catch { return }
       if (!pending) return
-      void fetch(`/api/progress/${encodeURIComponent(pending.bookId)}`, { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ track_id: pending.trackId, position: pending.position }) }).then(response => { if (response.ok) localStorage.removeItem('ruangdengar.pending-progress') }).catch(() => {})
+      const checkpoint = pending
+      void api<ListeningProgress | null>(`/api/progress/${encodeURIComponent(checkpoint.bookId)}`).then(async progress => {
+        if (localStorage.getItem('ruangdengar.pending-progress') !== stored) return
+        if (newerCheckpoint({ id: checkpoint.bookId, tracks: [{ id: checkpoint.trackId }], progress }, checkpoint)) {
+          const response = await persistCheckpoint(checkpoint)
+          if (!response.ok) return
+        }
+        if (localStorage.getItem('ruangdengar.pending-progress') === stored) localStorage.removeItem('ruangdengar.pending-progress')
+      }).catch(() => {})
     }
     window.addEventListener('pagehide', flush)
     window.addEventListener('online', retry)
@@ -203,7 +209,7 @@ function App() {
   }, [])
 
   const openBook = (book: Book) => navigate(`/book/${encodeURIComponent(book.id)}`)
-  const playBook = (book: Book) => { const track = book.tracks[0]; if (track) play(book, track, book.progress?.track_id === track.id ? book.progress.position : 0) }
+  const playBook = (book: Book) => { const track = resumeTrack(book); if (track) play(book, track, book.progress?.track_id === track.id ? book.progress.position : 0) }
   const groupLink = (mode: 'artist' | 'directory' | 'album', name: string) => navigate(`/group/${mode}?name=${encodeURIComponent(name)}`)
   return <div className="app-shell">
     <header className="app-header">

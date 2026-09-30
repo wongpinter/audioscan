@@ -298,6 +298,31 @@ def test_audio_endpoint_proxies_only_requested_range(
 ) -> None:
     import audioscan.web as web
 
+    original_spool = web.tempfile.TemporaryFile
+    writes: list[bytes] = []
+
+    class DiskSpool:
+        def __init__(self, **kwargs: Any) -> None:
+            self.file = original_spool(**kwargs)
+
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            self.file.close()
+
+        def write(self, chunk: bytes) -> int:
+            writes.append(chunk)
+            return self.file.write(chunk)
+
+        def seek(self, offset: int) -> int:
+            return self.file.seek(offset)
+
+        def read(self, size: int) -> bytes:
+            return self.file.read(size)
+
+    monkeypatch.setattr(web.tempfile, "TemporaryFile", DiskSpool)
+
     cfg = config(tmp_path)
     db = seeded_db(cfg.db_path)
     payload = b"0123456789abcdef"
@@ -319,6 +344,7 @@ def test_audio_endpoint_proxies_only_requested_range(
     response = client.get("/api/tracks/drive-track/audio")
     assert response.status_code == 200
     assert response.content == payload
+    assert b"".join(writes) == payload
     assert len(list((tmp_path / "media-cache").glob("*"))) == 1
     assert response.headers["content-type"].startswith("audio/mp4")
 
@@ -430,6 +456,7 @@ def test_library_scan_routes_return_progress_and_require_login(
         lock = web.threading.Lock()
         event_lock = web.threading.Lock()
         events: list[dict[str, Any]] = []
+        event_id = 0
         db: Database
 
         def __init__(self, config: WebConfig, db: Database) -> None:
@@ -555,3 +582,60 @@ def test_pwa_shell_manifest_and_service_worker(tmp_path: Path) -> None:
     assert "url.pathname !== '/'" in worker.text
     assert "Service-Worker-Allowed" in worker.headers
     assert client.get("/favicon.ico").status_code == 200
+
+
+def test_missing_session_secret_rejects_known_fallback_cookie_and_startup(tmp_path: Path) -> None:
+    import base64
+
+    from itsdangerous import TimestampSigner
+
+    cfg = config(tmp_path)
+    cfg.secret = ""
+    app = create_app(cfg, seeded_db(cfg.db_path))
+    client = TestClient(app)
+    payload = base64.b64encode(json.dumps({"email": cfg.allowed_email}).encode())
+    cookie = TimestampSigner("development-only-change-me-set-APP_SECRET_KEY").sign(payload)
+    client.cookies.set("session", cookie.decode())
+    assert client.get("/api/features").status_code == 401
+    with pytest.raises(RuntimeError, match="APP_SECRET_KEY"), TestClient(app):
+        pass
+
+
+def test_book_detail_includes_saved_progress(tmp_path: Path) -> None:
+    cfg = config(tmp_path)
+    db = seeded_db(cfg.db_path)
+    db.save_progress("book-key", "drive-track", 12.5)
+    client = TestClient(create_app(cfg, db))
+    sign_in(client)
+    progress = client.get("/api/books/book-key").json()["progress"]
+    assert progress["track_id"] == "drive-track"
+    assert progress["position"] == 12.5
+    assert progress["updated_at"].endswith("Z")
+
+
+def test_scan_subscription_does_not_replay_an_old_completion(tmp_path: Path) -> None:
+    import asyncio
+
+    cfg = config(tmp_path)
+    app = create_app(cfg, seeded_db(cfg.db_path))
+    scanner = app.state.scanner
+    scanner.publish(status="completed", total=1, processed=1)
+    scanner.publish(status="running", total=2, processed=0)
+    endpoint = next(route.endpoint for route in app.routes if getattr(route, "path", "") == "/api/library/events")
+
+    class FakeRequest:
+        session = {"email": cfg.allowed_email}
+
+        async def is_disconnected(self) -> bool:
+            return False
+
+    async def read_events() -> None:
+        response = endpoint(FakeRequest())
+        iterator = response.body_iterator
+        first = await anext(iterator)
+        second = await anext(iterator)
+        assert '"status": "running"' in first
+        assert '"status": "running"' in second
+        await iterator.aclose()
+
+    asyncio.run(read_events())
