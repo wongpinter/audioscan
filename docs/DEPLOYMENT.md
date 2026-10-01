@@ -50,7 +50,7 @@ APP_HOST=0.0.0.0 APP_PORT=8111 uv run ruangdengar-web
 
 Configure the HTTPS proxy to forward requests to the Uvicorn port. Set trusted proxy headers for the proxy IP only. Use a process manager that restarts the service after failure and host reboot.
 
-The first library scan starts after sign-in. Later scans resume from saved file checkpoints. Directory exclusions use paths already indexed by the app and remove matching library data when saved.
+The first library scan starts after sign-in. A new scan after a completed scan lists Drive folders and files again, then refreshes file metadata and discovers added audiobooks. If a scan stops or the app restarts during a scan, the next scan resumes from saved folder and file checkpoints. Directory exclusions use paths already indexed by the app and remove matching library data when saved.
 
 ## Cache behavior
 
