@@ -447,11 +447,16 @@ def test_scan_resume_uses_persisted_directory_queue(tmp_path: Path, monkeypatch:
 
     assert calls == [
         ("folders", "Child"),
-        ("files", "Child"),
         ("folders", "Child/Grandchild/"),
+        ("files", "Child"),
         ("files", "Child/Grandchild/"),
     ]
-    assert db.scan_directories() == []
+    assert db.scan_directories(listed=False) == []
+    assert db.scan_directories(scanned=False) == []
+    assert [item[:2] for item in db.inventory_directories()] == [
+        ("child", "Child"),
+        ("grandchild", "Child/Grandchild/"),
+    ]
 
 
 def test_cover_route_returns_embedded_image(
