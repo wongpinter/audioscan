@@ -678,6 +678,48 @@ def test_book_detail_includes_saved_progress(tmp_path: Path) -> None:
     assert progress["updated_at"].endswith("Z")
 
 
+def test_metadata_search_shows_google_books_and_open_library_candidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import httpx
+
+    import audioscan.web as web
+
+    responses = [
+        {
+            "items": [
+                {"id": "google-id", "volumeInfo": {"title": "Book", "authors": ["Author"]}}
+            ]
+        },
+        {
+            "docs": [
+                {"key": "/works/OL123W", "title": "Book", "author_name": ["Author"], "cover_i": 123}
+            ]
+        },
+    ]
+
+    class FakeClient:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            pass
+
+        async def get(self, url: str, **kwargs: Any) -> httpx.Response:
+            return httpx.Response(200, json=responses.pop(0), request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(web.httpx, "AsyncClient", FakeClient)
+    cfg = config(tmp_path)
+    client = TestClient(create_app(cfg, seeded_db(cfg.db_path)))
+    sign_in(client)
+    candidates = client.post("/api/books/book-key/metadata/search").json()["candidates"]
+    assert [item["source"] for item in candidates] == ["Google Books", "Open Library"]
+    assert candidates[1]["cover"].endswith("123-M.jpg")
+
+
 def test_manual_book_metadata_overrides_survive_library_rescan(tmp_path: Path) -> None:
     db = seeded_db(tmp_path / "library.sqlite3")
     updated = db.update_book_metadata(

@@ -1387,6 +1387,7 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
             )
             cover = info.get("imageLinks", {}).get("thumbnail") or ""
             candidate = {
+                "source": "Google Books",
                 "source_id": item.get("id"),
                 "title": info.get("title"),
                 "authors": info.get("authors", []),
@@ -1398,6 +1399,36 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
             }
             if candidate["title"] and candidate["source_id"]:
                 candidates.append(candidate)
+        open_library_params = {
+            "title": str(book.get("title", "")),
+            "author": str(book.get("artist", "")),
+            "fields": "key,title,author_name,first_publish_year,cover_i",
+            "limit": "8",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+                response = await client.get(
+                    "https://openlibrary.org/search.json", params=open_library_params
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise HTTPException(502, "Open Library search failed") from exc
+        for item in payload.get("docs", []):
+            cover_id = item.get("cover_i")
+            if item.get("title") and re.fullmatch(r"/works/OL[0-9]+W", str(item.get("key", ""))):
+                candidates.append({
+                    "source": "Open Library",
+                    "source_id": str(item["key"]).removeprefix("/works/"),
+                    "title": item.get("title"),
+                    "authors": item.get("author_name", []),
+                    "published_date": str(item.get("first_publish_year", "")),
+                    "cover": (
+                        f"https://covers.openlibrary.org/b/id/{cover_id}-M.jpg"
+                        if cover_id
+                        else ""
+                    ),
+                })
         return {"candidates": candidates}
 
     @app.post("/api/books/{book_id}/metadata/apply")
@@ -1408,17 +1439,29 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
         body = await request.json()
         if (
             not isinstance(body, dict)
+            or body.get("source") not in {"Google Books", "Open Library"}
             or not isinstance(body.get("source_id"), str)
             or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", body["source_id"])
         ):
-            raise HTTPException(422, "source_id is invalid")
+            raise HTTPException(422, "metadata source or source_id is invalid")
+        if body["source"] == "Google Books":
+            url = f"https://www.googleapis.com/books/v1/volumes/{body['source_id']}"
+        else:
+            url = f"https://openlibrary.org/works/{body['source_id']}.json"
         try:
             async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-                response = await client.get(
-                    f"https://www.googleapis.com/books/v1/volumes/{body['source_id']}"
-                )
+                response = await client.get(url)
                 response.raise_for_status()
-                info = response.json().get("volumeInfo", {})
+                payload = response.json()
+                if body["source"] == "Google Books":
+                    info = payload.get("volumeInfo", {})
+                else:
+                    info = {
+                        "title": payload.get("title"),
+                        "description": payload.get("description"),
+                        "authors": [],
+                        "covers": payload.get("covers", []),
+                    }
         except (httpx.HTTPError, ValueError) as exc:
             raise HTTPException(502, "Could not load selected metadata") from exc
         identifiers = info.get("industryIdentifiers", [])
@@ -1432,12 +1475,14 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
         )
         image_links = info.get("imageLinks", {})
         cover = image_links.get("thumbnail") or ""
+        if body["source"] == "Open Library" and info.get("covers"):
+            cover = f"https://covers.openlibrary.org/b/id/{info['covers'][0]}-L.jpg"
         metadata = {
             "title": info.get("title"),
             "artist": ", ".join(info.get("authors", [])) if info.get("authors") else None,
-            "description": info.get("description"),
-            "publisher": info.get("publisher"),
-            "published_date": info.get("publishedDate"),
+            "description": info.get("description", ""),
+            "publisher": info.get("publisher", ""),
+            "published_date": info.get("publishedDate", ""),
             "isbn": isbn,
             "cover": cover.replace("http://", "https://") or None,
         }
