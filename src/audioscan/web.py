@@ -814,10 +814,6 @@ class LibraryScanner:
             elif self.db.scan_file_count() == 0:
                 self.db.reset_scan_inventory()
             failed_ids = {item["id"] for item in items if item.get("error")}
-            if retry_failed:
-                items = [item for item in items if not item.get("error")]
-                with self.db.connect() as connection:
-                    connection.execute("DELETE FROM scan_items WHERE error != ''")
             excluded_directories = self.db.excluded_directories()
             excluded = {item["id"] for item in excluded_directories}
             excluded_prefixes = [item["path"].rstrip("/") + "/" for item in excluded_directories]
