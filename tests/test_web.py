@@ -423,6 +423,13 @@ def test_scan_resume_uses_persisted_directory_queue(tmp_path: Path, monkeypatch:
     cfg = config(tmp_path)
     db = seeded_db(cfg.db_path)
     db.enqueue_scan_directory("child", "Child")
+    db.queue_scan_directories([("grandchild", "Child/Grandchild/")])
+    db.mark_scan_directory("child", listed=True)
+    db.mark_scan_directory("child", scanned=True)
+    file = web.RemoteFile(id="missing", name="missing.mp3", path="Child/missing.mp3")
+    db.save_scan_files("child", [file])
+    db.mark_scan_files_listed("grandchild")
+    db.mark_scan_directory("grandchild", listed=True, scanned=True)
     calls: list[tuple[str, str]] = []
 
     class Source:
@@ -435,7 +442,7 @@ def test_scan_resume_uses_persisted_directory_queue(tmp_path: Path, monkeypatch:
 
         def iter_directory_files(self, folder_id: str, prefix: str) -> list[Any]:
             calls.append(("files", prefix))
-            return []
+            return [file] if folder_id == "child" else []
 
         def close(self) -> None:
             pass
@@ -443,20 +450,26 @@ def test_scan_resume_uses_persisted_directory_queue(tmp_path: Path, monkeypatch:
     monkeypatch.setattr(web, "DriveSource", Source)
     scanner = LibraryScanner(cfg, db)
     monkeypatch.setattr(scanner, "_commit", lambda items: None)
+    monkeypatch.setattr(
+        scanner,
+        "_probe_remote",
+        lambda source, remote: {
+            "id": remote.id, "path": remote.path, "name": remote.name,
+            "meta": {}, "error": "",
+        },
+    )
     scanner._run(retry_failed=False, resume=True)
 
-    assert calls == [
-        ("folders", "Child"),
-        ("folders", "Child/Grandchild/"),
-        ("files", "Child"),
-        ("files", "Child/Grandchild/"),
-    ]
+    assert calls == []
+    assert db.pending_scan_items()[0]["id"] == "missing"
+    assert db.scan_file_count() == 1
     assert db.scan_directories(listed=False) == []
     assert db.scan_directories(scanned=False) == []
     assert [item[:2] for item in db.inventory_directories()] == [
         ("child", "Child"),
         ("grandchild", "Child/Grandchild/"),
     ]
+    assert all(item[4] for item in db.inventory_directories())
 
 
 def test_cover_route_returns_embedded_image(

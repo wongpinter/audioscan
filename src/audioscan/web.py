@@ -200,12 +200,19 @@ class Database:
                 );
                 CREATE TABLE IF NOT EXISTS scan_directories (
                     id TEXT PRIMARY KEY, path TEXT NOT NULL,
-                    listed INTEGER NOT NULL DEFAULT 0, scanned INTEGER NOT NULL DEFAULT 0
+                    listed INTEGER NOT NULL DEFAULT 0, scanned INTEGER NOT NULL DEFAULT 0,
+                    files_listed INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS scan_inventory (
                     id TEXT PRIMARY KEY, path TEXT NOT NULL,
-                    listed INTEGER NOT NULL DEFAULT 0, scanned INTEGER NOT NULL DEFAULT 0
+                    listed INTEGER NOT NULL DEFAULT 0, scanned INTEGER NOT NULL DEFAULT 0,
+                    files_listed INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS scan_file_inventory (
+                    id TEXT PRIMARY KEY, folder_id TEXT NOT NULL, data TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS scan_file_inventory_folder
+                    ON scan_file_inventory(folder_id);
                 CREATE TABLE IF NOT EXISTS favorites (
                     book_id TEXT PRIMARY KEY
                 );
@@ -237,7 +244,7 @@ class Database:
             columns = {
                 row[1] for row in db.execute("PRAGMA table_info(scan_directories)")
             }
-            for column in ("listed", "scanned"):
+            for column in ("listed", "scanned", "files_listed"):
                 if column not in columns:
                     db.execute(
                         f"ALTER TABLE scan_directories ADD COLUMN {column} "
@@ -246,7 +253,7 @@ class Database:
             inventory_columns = {
                 row[1] for row in db.execute("PRAGMA table_info(scan_inventory)")
             }
-            for column in ("listed", "scanned"):
+            for column in ("listed", "scanned", "files_listed"):
                 if column not in inventory_columns:
                     db.execute(
                         f"ALTER TABLE scan_inventory ADD COLUMN {column} "
@@ -399,10 +406,70 @@ class Database:
     def clear_scan_items(self) -> None:
         with self.connect() as db:
             db.execute("DELETE FROM scan_items")
+            db.execute("DELETE FROM scan_file_inventory")
+
+    def save_scan_files(self, folder_id: str, files: list[RemoteFile]) -> None:
+        with self.connect() as db:
+            db.execute(
+                "DELETE FROM scan_file_inventory WHERE folder_id=?", (folder_id,)
+            )
+            db.execute(
+                "UPDATE scan_directories SET files_listed=0 WHERE id=?", (folder_id,)
+            )
+            db.execute("UPDATE scan_inventory SET files_listed=0 WHERE id=?", (folder_id,))
+            db.executemany(
+                "INSERT OR IGNORE INTO scan_file_inventory(id,folder_id,data) "
+                "VALUES(?,?,?)",
+                [
+                    (
+                        item.id,
+                        folder_id,
+                        json.dumps(
+                            {
+                                "id": item.id,
+                                "name": item.name,
+                                "path": item.path,
+                                "size": item.size,
+                                "mime_type": item.mime_type,
+                                "modified": item.modified,
+                                "md5": item.md5,
+                                "extra": item.extra,
+                            }
+                        ),
+                    )
+                    for item in files
+                ],
+            )
+            db.execute(
+                "UPDATE scan_directories SET files_listed=1 WHERE id=?", (folder_id,)
+            )
+            db.execute(
+                "UPDATE scan_inventory SET files_listed=1 WHERE id=?", (folder_id,)
+            )
+
+    def scan_files_for_directory(
+        self, folder_id: str, pending_ids: set[str]
+    ) -> list[RemoteFile]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT f.data FROM scan_file_inventory f "
+                "LEFT JOIN scan_items i ON i.id=f.id "
+                "WHERE f.folder_id=? AND (i.id IS NULL OR i.error != '') ORDER BY f.rowid",
+                (folder_id,),
+            ).fetchall()
+        return [
+            remote
+            for row in rows
+            if (remote := RemoteFile(**json.loads(row["data"]))).id not in pending_ids
+        ]
+
+    def scan_file_count(self) -> int:
+        with self.connect() as db:
+            return int(db.execute("SELECT count(*) FROM scan_file_inventory").fetchone()[0])
 
     def scan_directories(
         self, *, listed: bool | None = None, scanned: bool | None = None
-    ) -> list[tuple[str, str, bool, bool]]:
+    ) -> list[tuple[str, str, bool, bool, bool]]:
         conditions = []
         if listed is not None:
             conditions.append(f"listed={int(listed)}")
@@ -411,10 +478,14 @@ class Database:
         where = " WHERE " + " AND ".join(conditions) if conditions else ""
         with self.connect() as db:
             rows = db.execute(
-                f"SELECT id,path,listed,scanned FROM scan_directories{where} ORDER BY rowid"
+                f"SELECT id,path,listed,scanned,files_listed FROM scan_directories{where} "
+                "ORDER BY rowid"
             ).fetchall()
         return [
-            (str(row["id"]), str(row["path"]), bool(row["listed"]), bool(row["scanned"]))
+            (
+                str(row["id"]), str(row["path"]), bool(row["listed"]),
+                bool(row["scanned"]), bool(row["files_listed"]),
+            )
             for row in rows
         ]
 
@@ -450,9 +521,14 @@ class Database:
                     (*values, folder_id),
                 )
 
+    def mark_scan_files_listed(self, folder_id: str) -> None:
+        with self.connect() as db:
+            db.execute("UPDATE scan_directories SET files_listed=1 WHERE id=?", (folder_id,))
+            db.execute("UPDATE scan_inventory SET files_listed=1 WHERE id=?", (folder_id,))
+
     def inventory_directories(
         self, *, listed: bool | None = None, scanned: bool | None = None
-    ) -> list[tuple[str, str, bool, bool]]:
+    ) -> list[tuple[str, str, bool, bool, bool]]:
         conditions = []
         if listed is not None:
             conditions.append(f"listed={int(listed)}")
@@ -461,7 +537,8 @@ class Database:
         where = " WHERE " + " AND ".join(conditions) if conditions else ""
         with self.connect() as db:
             rows = db.execute(
-                f"SELECT id,path,listed,scanned FROM scan_inventory{where} ORDER BY rowid"
+                f"SELECT id,path,listed,scanned,files_listed FROM scan_inventory{where} "
+                "ORDER BY rowid"
             ).fetchall()
         return [
             (
@@ -469,6 +546,7 @@ class Database:
                 str(row["path"]),
                 bool(row["listed"]),
                 bool(row["scanned"]),
+                bool(row["files_listed"]),
             )
             for row in rows
         ]
@@ -733,35 +811,40 @@ class LibraryScanner:
                 self.db.clear_scan_items()
                 self.db.clear_scan_directories()
                 items = []
-            if self.db.inventory_directories():
+            elif self.db.scan_file_count() == 0:
                 self.db.reset_scan_inventory()
             failed_ids = {item["id"] for item in items if item.get("error")}
             if retry_failed:
                 items = [item for item in items if not item.get("error")]
                 with self.db.connect() as connection:
                     connection.execute("DELETE FROM scan_items WHERE error != ''")
-            seen = {item["id"] for item in items}
-            failures = 0
-            total = len(seen)
-            processed = len(seen)
             excluded_directories = self.db.excluded_directories()
             excluded = {item["id"] for item in excluded_directories}
             excluded_prefixes = [item["path"].rstrip("/") + "/" for item in excluded_directories]
+            if retry_failed:
+                with self.db.connect() as connection:
+                    connection.execute("DELETE FROM scan_items WHERE error != ''")
             items = [
-                item
-                for item in items
-                if not any(item.get("path", "").startswith(prefix) for prefix in excluded_prefixes)
+                item for item in self.db.pending_scan_items()
+                if not any(
+                    item.get("path", "").startswith(path) for path in excluded_prefixes
+                )
             ]
+            seen = {item["id"] for item in items if not item.get("error")}
             for item in self.db.pending_scan_items():
-                if any(item.get("path", "").startswith(prefix) for prefix in excluded_prefixes):
+                if any(
+                    item.get("path", "").startswith(path) for path in excluded_prefixes
+                ):
                     with self.db.connect() as connection:
                         connection.execute("DELETE FROM scan_items WHERE id=?", (item["id"],))
-            seen = {item["id"] for item in items}
+            failures = 0
+            total = len(seen)
+            processed = len(seen)
             if not self.db.inventory_directories():
                 self.db.enqueue_scan_directory(self.config.folder_id, "")
             # Inventory every folder first. Persist children before marking a parent complete.
             while directories := self.db.inventory_directories(listed=False):
-                folder_id, prefix, _listed, _scanned = directories[0]
+                folder_id, prefix, _listed, _scanned, _files_listed = directories[0]
                 if folder_id in excluded or any(
                     prefix.startswith(path) for path in excluded_prefixes
                 ):
@@ -782,21 +865,25 @@ class LibraryScanner:
             total = len(seen)
             processed = len(seen)
             failures = 0
-            for folder_id, prefix, _listed, _scanned in self.db.inventory_directories(
-                scanned=False
-            ):
+            for (
+                folder_id, prefix, _listed, scanned, files_listed
+            ) in self.db.inventory_directories():
                 if folder_id in excluded or any(
                     prefix.startswith(path) for path in excluded_prefixes
                 ):
                     self.db.mark_scan_directory(folder_id, scanned=True)
                     continue
+                if scanned and not self.db.scan_files_for_directory(folder_id, seen):
+                    continue
                 self.publish(
                     status="running", total=total, processed=processed,
                     current=f"Listing files: {prefix or '/'}", error="",
                 )
-                files = list(source.iter_directory_files(folder_id, prefix))
-                pending = [remote for remote in files if remote.id not in seen]
-                total += len(pending)
+                if not files_listed:
+                    files = list(source.iter_directory_files(folder_id, prefix))
+                    self.db.save_scan_files(folder_id, files)
+                pending = self.db.scan_files_for_directory(folder_id, seen)
+                total = self.db.scan_file_count()
                 self.publish(total=total, processed=processed, current=prefix or "/")
                 with ThreadPoolExecutor(max_workers=5, thread_name_prefix="drive-probe") as pool:
                     futures = {
@@ -824,12 +911,6 @@ class LibraryScanner:
                         if error:
                             failed_ids.add(remote.id)
                 self.db.mark_scan_directory(folder_id, scanned=True)
-            if retry_failed and failures:
-                with self.db.connect() as connection:
-                    connection.execute("DELETE FROM scan_items WHERE error != ''")
-                self.db.save_scan_status(status="failed", processed=processed - failures)
-                self.start(retry_failed=False)
-                return
             self._commit(items)
             remaining_failures = len(failed_ids) if not retry_failed else failures
             current_status = self.db.scan_status()
