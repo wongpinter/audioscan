@@ -433,9 +433,10 @@ function BookPage({ onPlay }: { onPlay: (book: Book, track: Track, start?: numbe
   const searchMetadata = async () => {
     setMetadataBusy(true); setMetadataError(''); setCandidates([]); setSelectedCandidate(null)
     try {
-      const result = await api<{ candidates: MetadataCandidate[] }>(`/api/books/${encodeURIComponent(bookId)}/metadata/search`, { method: 'POST' })
+      const result = await api<{ candidates: MetadataCandidate[]; source_errors?: string[] }>(`/api/books/${encodeURIComponent(bookId)}/metadata/search`, { method: 'POST' })
       setCandidates(result.candidates)
-      if (!result.candidates.length) setMetadataError('No matches found.')
+      if (result.source_errors?.length) setMetadataError(`Some sources failed: ${result.source_errors.join(', ')}.`)
+      else if (!result.candidates.length) setMetadataError('No matches found.')
     } catch (e) { setMetadataError(e instanceof Error ? e.message : 'Metadata search failed.') }
     finally { setMetadataBusy(false) }
   }

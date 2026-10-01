@@ -1365,6 +1365,8 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
             "q": f"{book.get('title', '')} {book.get('artist', '')}".strip(),
             "maxResults": "8",
         }
+        candidates = []
+        source_errors = []
         try:
             async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
                 response = await client.get(
@@ -1372,9 +1374,9 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
                 )
                 response.raise_for_status()
                 payload = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise HTTPException(502, "Metadata search failed") from exc
-        candidates = []
+        except (httpx.HTTPError, ValueError):
+            source_errors.append("Google Books")
+            payload = {}
         for item in payload.get("items", []):
             info = item.get("volumeInfo", {})
             isbn = next(
@@ -1412,8 +1414,9 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
                 )
                 response.raise_for_status()
                 payload = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise HTTPException(502, "Open Library search failed") from exc
+        except (httpx.HTTPError, ValueError):
+            source_errors.append("Open Library")
+            payload = {}
         for item in payload.get("docs", []):
             cover_id = item.get("cover_i")
             if item.get("title") and re.fullmatch(r"/works/OL[0-9]+W", str(item.get("key", ""))):
@@ -1429,7 +1432,12 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
                         else ""
                     ),
                 })
-        return {"candidates": candidates}
+        if not candidates and source_errors:
+            raise HTTPException(
+                502,
+                "Metadata search failed for: " + ", ".join(source_errors),
+            )
+        return {"candidates": candidates, "source_errors": source_errors}
 
     @app.post("/api/books/{book_id}/metadata/apply")
     async def apply_book_metadata(book_id: str, request: Request) -> dict[str, Any]:
