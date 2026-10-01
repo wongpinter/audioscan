@@ -383,7 +383,7 @@ function ScanProgress({ scan, onRefresh }: { scan: ScanStatus; onRefresh: () => 
   const percent = scan.total ? Math.min(100, Math.round(scan.processed / scan.total * 100)) : 0
   return <Card className={`scan-card ${running ? 'scan-running' : done ? 'scan-done' : 'scan-error'}`} role="status" aria-live="polite">
     <div className="scan-icon">{running ? <LoaderCircle className="spin" size={18} /> : <CheckCircle2 size={18} />}</div>
-    <div className="scan-content"><div className="scan-topline"><strong>{running ? 'Updating your library' : done ? 'Library is up to date' : 'Scan needs attention'}</strong><span>{scan.total ? `${percent}%` : running ? 'Preparing' : scan.status}</span></div>
+    <div className="scan-content"><div className="scan-topline"><strong>{running ? 'Updating your library' : done ? (scan.error ? 'Drive scan complete with errors' : 'Library is up to date') : 'Scan needs attention'}</strong><span>{scan.total ? `${percent}%` : running ? 'Preparing' : scan.status}</span></div>
       <div className="scan-bar"><span className={scan.total ? '' : 'indeterminate'} style={scan.total ? { width: `${percent}%` } : undefined} /></div>
       <div className="scan-subline"><span>{scan.error || (scan.total ? `${scan.processed.toLocaleString()} of ${scan.total.toLocaleString()} files checked` : scan.current || 'Connecting to Google Drive')}</span>{running && scan.total > 0 && <span>{Math.max(0, scan.total - scan.processed).toLocaleString()} left</span>}</div>
       {running && scan.current && scan.total > 0 && <div className="scan-current" title={scan.current}>{scan.current}</div>}

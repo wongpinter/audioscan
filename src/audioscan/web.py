@@ -913,7 +913,7 @@ class LibraryScanner:
             if current_status and current_status.get("status") == "failed":
                 self.db.save_scan_status(processed=processed - failures)
             self.publish(
-                status="failed" if remaining_failures else "completed",
+                status="completed",
                 total=total,
                 processed=processed,
                 current="",

@@ -455,7 +455,7 @@ def test_scan_resume_uses_persisted_directory_queue(tmp_path: Path, monkeypatch:
         "_probe_remote",
         lambda source, remote: {
             "id": remote.id, "path": remote.path, "name": remote.name,
-            "meta": {}, "error": "",
+            "meta": {}, "error": "bad media metadata",
         },
     )
     scanner._run(retry_failed=False, resume=True)
@@ -463,6 +463,11 @@ def test_scan_resume_uses_persisted_directory_queue(tmp_path: Path, monkeypatch:
     assert calls == []
     assert db.pending_scan_items()[0]["id"] == "missing"
     assert db.scan_file_count() == 1
+    status = db.scan_status()
+    assert status is not None
+    assert status["status"] == "completed"
+    assert status["processed"] == status["total"] == 1
+    assert "1 file(s) failed" in status["error"]
     assert db.scan_directories(listed=False) == []
     assert db.scan_directories(scanned=False) == []
     assert [item[:2] for item in db.inventory_directories()] == [
