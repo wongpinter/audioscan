@@ -11,6 +11,7 @@ export type Track = {
   format?: string
 }
 export type Progress = { track_id: string; position: number; updated_at?: string }
+export type MetadataCandidate = { source_id: string; title: string; authors: string[]; description?: string; publisher?: string; published_date?: string; isbn?: string; cover?: string }
 export type Book = {
   id: string
   title: string

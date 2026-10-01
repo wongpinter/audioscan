@@ -3,7 +3,7 @@ import { Link, Route, Routes, useLocation, useNavigate, useParams, useSearchPara
 import { ArrowLeft, BookOpen, CheckCircle2, Clock3, Headphones, Library, LoaderCircle, Search, Settings2, SlidersHorizontal, Heart, Star, Plus } from 'lucide-react'
 import { Avatar, Button, Card, Cover, Input, PlayIcon, Progress, Skeleton } from './components/ui'
 import { PlayerBar } from './components/PlayerBar'
-import type { Book, Chapter, Progress as ListeningProgress, Track } from './types'
+import type { Book, Chapter, MetadataCandidate, Progress as ListeningProgress, Track } from './types'
 import { resumeTrack, listeningStatus, newerCheckpoint, persistCheckpoint, type Checkpoint } from './listening'
 
 type ScanStatus = { status: string; total: number; processed: number; current: string; error: string }
@@ -420,19 +420,43 @@ function BookPage({ onPlay }: { onPlay: (book: Book, track: Track, start?: numbe
   const [book, setBook] = useState<Book | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  const [metadataBusy, setMetadataBusy] = useState(false)
+  const [metadataError, setMetadataError] = useState('')
+  const [candidates, setCandidates] = useState<MetadataCandidate[]>([])
+  const [selectedCandidate, setSelectedCandidate] = useState<string | null>(null)
   useEffect(() => {
     setLoading(true)
     setBook(null)
     setError('')
     void api<Book>(`/api/books/${encodeURIComponent(bookId)}`).then(setBook).catch(e => setError(e instanceof Error ? e.message : 'Could not load book.')).finally(() => setLoading(false))
   }, [bookId])
+  const searchMetadata = async () => {
+    setMetadataBusy(true); setMetadataError(''); setCandidates([]); setSelectedCandidate(null)
+    try {
+      const result = await api<{ candidates: MetadataCandidate[] }>(`/api/books/${encodeURIComponent(bookId)}/metadata/search`, { method: 'POST' })
+      setCandidates(result.candidates)
+      if (!result.candidates.length) setMetadataError('No matches found.')
+    } catch (e) { setMetadataError(e instanceof Error ? e.message : 'Metadata search failed.') }
+    finally { setMetadataBusy(false) }
+  }
+  const applyMetadata = async () => {
+    if (!selectedCandidate) return
+    setMetadataBusy(true); setMetadataError('')
+    try {
+      const updated = await api<Book>(`/api/books/${encodeURIComponent(bookId)}/metadata/apply`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source_id: selectedCandidate }) })
+      setBook(updated); setCandidates([])
+    } catch (e) { setMetadataError(e instanceof Error ? e.message : 'Could not apply metadata.') }
+    finally { setMetadataBusy(false) }
+  }
   if (error) return <div className="empty-state">{error}</div>
   if (loading) return <BookSkeleton />
   if (!book) return <div className="empty-state">Audiobook not found.</div>
   const totalChapters = book.tracks.reduce((sum, track) => sum + (track.chapter_count ?? 0), 0)
   return <section className="book-page"><Link className="back-link" to="/"><ArrowLeft size={17} /> Your library</Link>
     <div className="book-hero"><Cover className="book-cover" src={book.cover || '/icon.svg'} alt={`${book.title} cover`} /><div className="book-info"><div className="eyebrow">AUDIOBOOK</div><h1>{book.title}</h1><p className="book-author">{book.artist || 'Unknown author'}</p><div className="book-facts"><span><Headphones size={15} />{book.tracks.length} parts</span><span><Clock3 size={15} />{duration(book.duration)}</span><span><BookOpen size={15} />{totalChapters} chapters</span></div><Button className="primary-action" onClick={() => { const track = book.tracks.find(item => item.id === book.progress?.track_id) || book.tracks[0]; if (track) onPlay(book, track, book.progress?.position || 0) }}><PlayIcon /> Listen now</Button></div></div>
-    <div className="tracks-heading"><div><h2>Contents</h2><p>{book.tracks.length} {book.tracks.length === 1 ? 'audio file' : 'audio files'}</p></div></div>
+    <div className="tracks-heading"><div><h2>Contents</h2><p>{book.tracks.length} {book.tracks.length === 1 ? 'audio file' : 'audio files'}</p></div><Button disabled={metadataBusy} onClick={() => void searchMetadata()}>{metadataBusy ? 'Searching…' : 'Find metadata'}</Button></div>
+    {metadataError && <p role="status">{metadataError}</p>}
+    {!!candidates.length && <section className="metadata-candidates" aria-label="Metadata matches">{candidates.map(candidate => <label className="metadata-candidate" key={candidate.source_id}><input type="radio" name="metadata-candidate" checked={selectedCandidate === candidate.source_id} onChange={() => setSelectedCandidate(candidate.source_id)} /><span><strong>{candidate.title}</strong><small>{candidate.authors.join(', ')}{candidate.published_date ? ` · ${candidate.published_date}` : ''}</small>{candidate.description && <small>{candidate.description.slice(0, 240)}</small>}</span>{candidate.cover && <img src={candidate.cover} alt="" />}</label>)}<Button disabled={metadataBusy || !selectedCandidate} onClick={() => void applyMetadata()}>Apply selected metadata</Button></section>}
     <div className="track-list">{book.tracks.map((track, index) => <TrackSection key={track.id} book={book} track={track} index={index} onPlay={onPlay} />)}</div>
   </section>
 }

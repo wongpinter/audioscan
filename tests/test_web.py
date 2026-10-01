@@ -678,6 +678,34 @@ def test_book_detail_includes_saved_progress(tmp_path: Path) -> None:
     assert progress["updated_at"].endswith("Z")
 
 
+def test_manual_book_metadata_overrides_survive_library_rescan(tmp_path: Path) -> None:
+    db = seeded_db(tmp_path / "library.sqlite3")
+    updated = db.update_book_metadata(
+        "book-key",
+        {
+            "title": "Improved Book Title",
+            "artist": "Better Author",
+            "cover": "https://cover.test/book.jpg",
+            "description": "Description",
+            "unknown": "ignored",
+        },
+    )
+    assert updated is not None
+    assert updated["title"] == "Improved Book Title"
+    db.save_library(
+        [{"id": "book-key", "title": "Book", "artist": "Author", "duration": 60,
+          "tracks": [{"id": "drive-track"}]}],
+        [{"id": "drive-track", "book_id": "book-key", "name": "Book.m4b",
+          "path": "Book.m4b", "size": 16, "mime_type": "audio/mp4"}],
+    )
+    rescanned = db.book("book-key")
+    assert rescanned is not None
+    assert rescanned["title"] == "Improved Book Title"
+    assert rescanned["artist"] == "Better Author"
+    assert rescanned["cover"] == "https://cover.test/book.jpg"
+    assert rescanned["description"] == "Description"
+
+
 def test_scan_subscription_does_not_replay_an_old_completion(tmp_path: Path) -> None:
     import asyncio
 

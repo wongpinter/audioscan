@@ -321,6 +321,25 @@ class Database:
         book["progress"] = dict(progress) if progress else None
         return book
 
+    def update_book_metadata(self, book_id: str, metadata: dict[str, Any]) -> dict[str, Any] | None:
+        allowed = {
+            "title", "artist", "album_artist", "album", "description", "publisher",
+            "published_date", "isbn", "cover",
+        }
+        with self.connect() as db:
+            row = db.execute("SELECT data FROM books WHERE id=?", (book_id,)).fetchone()
+            if row is None:
+                return None
+            book = json.loads(row["data"])
+            overrides = book.setdefault("metadata_overrides", {})
+            overrides.update({key: value for key, value in metadata.items() if key in allowed})
+            book.update(overrides)
+            db.execute(
+                "UPDATE books SET title=?,artist=?,cover=?,data=? WHERE id=?",
+                (book["title"], book.get("artist"), book.get("cover"), json.dumps(book), book_id),
+            )
+        return book
+
     def track(self, track_id: str) -> dict[str, Any] | None:
         with self.connect() as db:
             row = db.execute("SELECT data FROM tracks WHERE id=?", (track_id,)).fetchone()
@@ -329,6 +348,15 @@ class Database:
     def save_library(self, books: list[dict[str, Any]], tracks: list[dict[str, Any]]) -> None:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            overrides = {
+                row["id"]: json.loads(row["data"]).get("metadata_overrides", {})
+                for row in db.execute("SELECT id,data FROM books")
+            }
+            for book in books:
+                saved = overrides.get(book["id"], {})
+                if saved:
+                    book["metadata_overrides"] = saved
+                    book.update(saved)
             db.execute("DELETE FROM tracks")
             db.execute("DELETE FROM books")
             db.executemany(
@@ -1326,6 +1354,99 @@ def create_app(config: WebConfig | None = None, db: Database | None = None) -> F
                 track["chapters"] = []
             return book
         raise HTTPException(404, "Book has no playable tracks")
+
+    @app.post("/api/books/{book_id}/metadata/search")
+    async def search_book_metadata(book_id: str, request: Request) -> dict[str, Any]:
+        user(request)
+        book = db.book(book_id)
+        if book is None:
+            raise HTTPException(404, "Book not found")
+        params = {
+            "q": f"{book.get('title', '')} {book.get('artist', '')}".strip(),
+            "maxResults": "8",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+                response = await client.get(
+                    "https://www.googleapis.com/books/v1/volumes", params=params
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise HTTPException(502, "Metadata search failed") from exc
+        candidates = []
+        for item in payload.get("items", []):
+            info = item.get("volumeInfo", {})
+            isbn = next(
+                (
+                    entry["identifier"]
+                    for entry in info.get("industryIdentifiers", [])
+                    if entry.get("type") in {"ISBN_13", "ISBN_10"}
+                ),
+                None,
+            )
+            cover = info.get("imageLinks", {}).get("thumbnail") or ""
+            candidate = {
+                "source_id": item.get("id"),
+                "title": info.get("title"),
+                "authors": info.get("authors", []),
+                "description": info.get("description"),
+                "publisher": info.get("publisher"),
+                "published_date": info.get("publishedDate"),
+                "isbn": isbn,
+                "cover": cover.replace("http://", "https://"),
+            }
+            if candidate["title"] and candidate["source_id"]:
+                candidates.append(candidate)
+        return {"candidates": candidates}
+
+    @app.post("/api/books/{book_id}/metadata/apply")
+    async def apply_book_metadata(book_id: str, request: Request) -> dict[str, Any]:
+        user(request)
+        if db.book(book_id) is None:
+            raise HTTPException(404, "Book not found")
+        body = await request.json()
+        if (
+            not isinstance(body, dict)
+            or not isinstance(body.get("source_id"), str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", body["source_id"])
+        ):
+            raise HTTPException(422, "source_id is invalid")
+        try:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+                response = await client.get(
+                    f"https://www.googleapis.com/books/v1/volumes/{body['source_id']}"
+                )
+                response.raise_for_status()
+                info = response.json().get("volumeInfo", {})
+        except (httpx.HTTPError, ValueError) as exc:
+            raise HTTPException(502, "Could not load selected metadata") from exc
+        identifiers = info.get("industryIdentifiers", [])
+        isbn = next(
+            (
+                entry["identifier"]
+                for entry in identifiers
+                if entry.get("type") in {"ISBN_13", "ISBN_10"}
+            ),
+            None,
+        )
+        image_links = info.get("imageLinks", {})
+        cover = image_links.get("thumbnail") or ""
+        metadata = {
+            "title": info.get("title"),
+            "artist": ", ".join(info.get("authors", [])) if info.get("authors") else None,
+            "description": info.get("description"),
+            "publisher": info.get("publisher"),
+            "published_date": info.get("publishedDate"),
+            "isbn": isbn,
+            "cover": cover.replace("http://", "https://") or None,
+        }
+        updated = db.update_book_metadata(
+            book_id, {key: value for key, value in metadata.items() if value}
+        )
+        if updated is None:
+            raise HTTPException(404, "Book not found")
+        return updated
 
     @app.put("/api/progress/{book_id}")
     async def progress(book_id: str, request: Request) -> dict[str, Any]:
